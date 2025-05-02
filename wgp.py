@@ -4657,7 +4657,7 @@ def generate_configuration_tab(state, blocks, header, model_choice):
         )
 
 def generate_about_tab():
-    gr.Markdown("<H2>WanGP - Wan 2.1 model for the GPU Poor by <B>DeepBeepMeep</B> (<A HREF='https://github.com/deepbeepmeep/Wan2GP'>GitHub</A>)</H2>")
+    gr.Markdown("<H2>Wan 2.1 model for the GPU Poor</H2>")
     gr.Markdown("Original Wan 2.1 Model by <B>Alibaba</B> (<A HREF='https://github.com/Wan-Video/Wan2.1'>GitHub</A>)")
     gr.Markdown("Many thanks to:")
     gr.Markdown("- <B>Alibaba Wan team for the best open source video generator")
@@ -4674,7 +4674,7 @@ def generate_about_tab():
 
 
 def generate_info_tab():
-    gr.Markdown("<FONT SIZE=3>Welcome to WanGP a super fast and low VRAM AI Video Generator !</FONT>")
+    gr.Markdown("<FONT SIZE=3>Welcome to a super fast and low VRAM AI Video Generator !</FONT>")
     
     gr.Markdown("The VRAM requirements will depend greatly of the resolution and the duration of the video, for instance :")
     gr.Markdown("- 848 x 480 with a 14B model: 80 frames (5s) : 8 GB of VRAM")
@@ -5034,8 +5034,8 @@ def create_demo():
     else:
         theme = gr.themes.Soft(font=["Verdana"], primary_hue="sky", neutral_hue="slate", text_size="md")
 
-    with gr.Blocks(css=css, theme=theme, title= "Wan2GP") as main:
-        gr.Markdown("<div align=center><H1>Wan<SUP>GP</SUP> v4.4 <FONT SIZE=4>by <I>DeepBeepMeep</I></FONT> <FONT SIZE=3>") # (<A HREF='https://github.com/deepbeepmeep/Wan2GP'>Updates</A>)</FONT SIZE=3></H1></div>")
+    with gr.Blocks(css=css, theme=theme, title= "PixelByte") as main:
+        gr.Markdown("<div align=center><H1>Pixel<SUP>Byte</SUP>")
         global model_list
 
         tab_state = gr.State({ "tab_no":0 }) 
