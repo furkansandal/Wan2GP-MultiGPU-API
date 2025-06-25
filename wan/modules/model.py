@@ -154,7 +154,8 @@ class WanSelfAttention(nn.Module):
                  num_heads,
                  window_size=(-1, -1),
                  qk_norm=True,
-                 eps=1e-6):
+                 eps=1e-6,
+                 block_no=0):
         assert dim % num_heads == 0
         super().__init__()
         self.dim = dim
@@ -163,6 +164,7 @@ class WanSelfAttention(nn.Module):
         self.window_size = window_size
         self.qk_norm = qk_norm
         self.eps = eps
+        self.block_no = block_no
 
         # layers
         self.q = nn.Linear(dim, dim)
@@ -171,6 +173,7 @@ class WanSelfAttention(nn.Module):
         self.o = nn.Linear(dim, dim)
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+
 
     def forward(self, xlist, grid_sizes, freqs, block_mask = None):
         r"""
@@ -197,9 +200,17 @@ class WanSelfAttention(nn.Module):
         del q,k
 
         q,k = apply_rotary_emb(qklist, freqs, head_first=False)
-        qkv_list = [q,k,v]
-        del q,k,v
-        if block_mask == None:
+        chipmunk = offload.shared_state.get("_chipmunk", False) 
+        if chipmunk and self.__class__ == WanSelfAttention:
+            q = q.transpose(1,2)
+            k = k.transpose(1,2)
+            v = v.transpose(1,2)
+            attn_layers = offload.shared_state["_chipmunk_layers"]
+            x = attn_layers[self.block_no](q, k, v)
+            x = x.transpose(1,2)
+        elif block_mask == None:
+            qkv_list = [q,k,v]
+            del q,k,v
             x = pay_attention(
                 qkv_list,
                 window_size=self.window_size)
@@ -212,6 +223,7 @@ class WanSelfAttention(nn.Module):
                     .transpose(1, 2)
                     .contiguous()
                 )
+                del q,k,v
 
         # if not self._flag_ar_attention:
         #     q = rope_apply(q, grid_sizes, freqs)
@@ -241,7 +253,7 @@ class WanSelfAttention(nn.Module):
 
 class WanT2VCrossAttention(WanSelfAttention):
 
-    def forward(self, xlist, context):
+    def forward(self, xlist, context, grid_sizes, *args, **kwargs):
         r"""
         Args:
             x(Tensor): Shape [B, L1, C]
@@ -262,6 +274,7 @@ class WanT2VCrossAttention(WanSelfAttention):
         v = self.v(context).view(b, -1, n, d)
 
         # compute attention
+        v = v.contiguous().clone()
         qvl_list=[q, k, v]
         del q, k, v
         x = pay_attention(qvl_list,  cross_attn= True)
@@ -279,15 +292,16 @@ class WanI2VCrossAttention(WanSelfAttention):
                  num_heads,
                  window_size=(-1, -1),
                  qk_norm=True,
-                 eps=1e-6):
-        super().__init__(dim, num_heads, window_size, qk_norm, eps)
+                 eps=1e-6,
+                 block_no=0):
+        super().__init__(dim, num_heads, window_size, qk_norm, eps, block_no)
 
         self.k_img = nn.Linear(dim, dim)
         self.v_img = nn.Linear(dim, dim)
         # self.alpha = nn.Parameter(torch.zeros((1, )))
         self.norm_k_img = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
 
-    def forward(self, xlist, context):
+    def forward(self, xlist, context, grid_sizes, audio_proj, audio_scale, audio_context_lens ):
         r"""
         Args:
             x(Tensor): Shape [B, L1, C]
@@ -319,6 +333,8 @@ class WanI2VCrossAttention(WanSelfAttention):
         del k,v
         x = pay_attention(qkv_list)
 
+        if audio_scale != None:
+            audio_x = self.processor(q, audio_proj, grid_sizes[0], audio_context_lens)
         k_img = self.k_img(context_img)
         self.norm_k_img(k_img)
         k_img = k_img.view(b, -1, n, d)
@@ -334,6 +350,8 @@ class WanI2VCrossAttention(WanSelfAttention):
         img_x = img_x.flatten(2)
         x += img_x
         del img_x
+        if audio_scale != None:
+            x.add_(audio_x, alpha= audio_scale)
         x = self.o(x)
         return x
 
@@ -356,7 +374,8 @@ class WanAttentionBlock(nn.Module):
                  qk_norm=True,
                  cross_attn_norm=False,
                  eps=1e-6,
-                 block_id=None
+                 block_id=None,
+                 block_no = 0
                  ):
         super().__init__()
         self.dim = dim
@@ -366,11 +385,12 @@ class WanAttentionBlock(nn.Module):
         self.qk_norm = qk_norm
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
+        self.block_no = block_no
 
         # layers
         self.norm1 = WanLayerNorm(dim, eps)
         self.self_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm,
-                                          eps)
+                                          eps, block_no= block_no)
         self.norm3 = WanLayerNorm(
             dim, eps,
             elementwise_affine=True) if cross_attn_norm else nn.Identity()
@@ -378,7 +398,8 @@ class WanAttentionBlock(nn.Module):
                                                                       num_heads,
                                                                       (-1, -1),
                                                                       qk_norm,
-                                                                      eps)
+                                                                      eps, 
+                                                                      block_no)
         self.norm2 = WanLayerNorm(dim, eps)
         self.ffn = nn.Sequential(
             nn.Linear(dim, ffn_dim), nn.GELU(approximate='tanh'),
@@ -396,9 +417,12 @@ class WanAttentionBlock(nn.Module):
         freqs,
         context,
         hints= None, 
-        context_scale=1.0,
+        context_scale=[1.0],
         cam_emb= None,
-        block_mask = None
+        block_mask = None,
+        audio_proj= None,
+        audio_context_lens= None,
+        audio_scale=None,
     ):
         r"""
         Args:
@@ -407,7 +431,7 @@ class WanAttentionBlock(nn.Module):
             grid_sizes(Tensor): Shape [B, 3], the second dimension contains (F, H, W)
             freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
         """
-        hint = None
+        hints_processed = None
         attention_dtype =  self.self_attn.q.weight.dtype 
         dtype = x.dtype
 
@@ -418,10 +442,13 @@ class WanAttentionBlock(nn.Module):
                 "context" : context,
                 "e" : e,
             }
-            if self.block_id == 0:
-                hint = self.vace(hints, x, **kwargs)
-            else:
-                hint = self.vace(hints, None, **kwargs)
+            hints_processed= []
+            for scale, hint in zip(context_scale, hints):
+                if scale == 0:
+                    hints_processed.append(None)
+                else:
+                    hints_processed.append(self.vace(hint, x, **kwargs) if self.block_id == 0 else self.vace(hint, None, **kwargs))
+                     
         latent_frames = e.shape[0]
         e = (self.modulation + e).chunk(6, dim=1)
         # self-attention
@@ -433,7 +460,7 @@ class WanAttentionBlock(nn.Module):
         if cam_emb != None:
             cam_emb = self.cam_encoder(cam_emb)
             cam_emb = cam_emb.repeat(1, 2, 1)
-            cam_emb = cam_emb.unsqueeze(2).unsqueeze(3).repeat(1, 1, grid_sizes[0][1], grid_sizes[0][2], 1)
+            cam_emb = cam_emb.unsqueeze(2).unsqueeze(3).repeat(1, 1, grid_sizes[1], grid_sizes[2], 1)
             cam_emb = rearrange(cam_emb, 'b f h w d -> b (f h w) d')
             x_mod += cam_emb
 
@@ -453,7 +480,7 @@ class WanAttentionBlock(nn.Module):
         y = y.to(attention_dtype)
         ylist= [y]
         del y
-        x += self.cross_attn(ylist, context).to(dtype)
+        x += self.cross_attn(ylist, context, grid_sizes, audio_proj, audio_scale, audio_context_lens).to(dtype)
 
         y = self.norm2(x)
 
@@ -482,11 +509,13 @@ class WanAttentionBlock(nn.Module):
         x.addcmul_(y, e[5])
         x, y = reshape_latent(x , 1), reshape_latent(y , 1)
 
-        if hint is not None:
-            if context_scale == 1:
-                x.add_(hint)
-            else:
-                x.add_(hint, alpha= context_scale)
+        if hints_processed is not None:
+            for hint, scale in zip(hints_processed, context_scale):
+                if scale != 0:
+                    if scale == 1:
+                        x.add_(hint)
+                    else:
+                        x.add_(hint, alpha= scale)
         return x 
 
 
@@ -580,6 +609,82 @@ class MLPProj(torch.nn.Module):
 
 
 class WanModel(ModelMixin, ConfigMixin):
+    def setup_chipmunk(self):
+        # from chipmunk.util import LayerCounter
+        # from chipmunk.modules import SparseDiffMlp, SparseDiffAttn
+        seq_shape = (21, 45, 80)
+        chipmunk_layers =[]
+        for i in range(self.num_layers):
+            layer_num, layer_counter = LayerCounter.build_for_layer(is_attn_sparse=True, is_mlp_sparse=False)            
+            chipmunk_layers.append( SparseDiffAttn(layer_num, layer_counter))
+        offload.shared_state["_chipmunk_layers"] = chipmunk_layers
+
+        chipmunk_layers[0].initialize_static_mask(
+            seq_shape=seq_shape,
+            txt_len=0,
+            local_heads_num=self.num_heads,
+            device='cuda'
+        )
+        chipmunk_layers[0].layer_counter.reset()
+
+    def release_chipmunk(self):
+        offload.shared_state["_chipmunk_layers"] = None
+
+    def preprocess_loras(self, model_type, sd):
+
+        first = next(iter(sd), None)
+        if first == None:
+            return sd
+        
+        if first.startswith("lora_unet_"):
+            new_sd = {}
+            print("Converting Lora Safetensors format to Lora Diffusers format")
+            alphas = {}
+            repl_list = ["cross_attn", "self_attn", "ffn"]
+            src_list = ["_" + k + "_" for k in repl_list]
+            tgt_list = ["." + k + "." for k in repl_list]
+
+            for k,v in sd.items():
+                k = k.replace("lora_unet_blocks_","diffusion_model.blocks.")
+
+                for s,t in zip(src_list, tgt_list):
+                    k = k.replace(s,t)
+
+                k = k.replace("lora_up","lora_B")
+                k = k.replace("lora_down","lora_A")
+
+                if "alpha" in k:
+                    alphas[k] = v
+                else:
+                    new_sd[k] = v
+
+            new_alphas = {}
+            for k,v in new_sd.items():
+                if "lora_B" in k:
+                    dim = v.shape[1]
+                elif "lora_A" in k:
+                    dim = v.shape[0]
+                else:
+                    continue
+                alpha_key = k[:-len("lora_X.weight")] +"alpha"
+                if alpha_key in alphas:
+                    scale = alphas[alpha_key] / dim
+                    new_alphas[alpha_key] = scale
+                else:
+                    print(f"Lora alpha'{alpha_key}' is missing")
+            new_sd.update(new_alphas)
+            sd = new_sd
+        from wgp import test_class_i2v 
+        if not test_class_i2v(model_type):
+            new_sd = {}
+            # convert loras for i2v to t2v
+            for k,v in sd.items():
+                if  any(layer in k for layer in ["cross_attn.k_img", "cross_attn.v_img"]):
+                    continue
+                new_sd[k] = v
+            sd = new_sd
+
+        return sd    
     r"""
     Wan diffusion backbone supporting both text-to-video and image-to-video.
     """
@@ -610,6 +715,7 @@ class WanModel(ModelMixin, ConfigMixin):
                  eps=1e-6,
                  recammaster = False,
                  inject_sample_info = False,
+                 fantasytalking_dim = 0,
                  ):
         r"""
         Initialize the diffusion model backbone.
@@ -691,8 +797,8 @@ class WanModel(ModelMixin, ConfigMixin):
             cross_attn_type = 't2v_cross_attn' if model_type == 't2v' else 'i2v_cross_attn'
             self.blocks = nn.ModuleList([
                 WanAttentionBlock(cross_attn_type, dim, ffn_dim, num_heads,
-                                window_size, qk_norm, cross_attn_norm, eps)
-                for _ in range(num_layers)
+                                window_size, qk_norm, cross_attn_norm, eps, block_no =i)
+                for i in range(num_layers)
             ])
 
         # head
@@ -716,7 +822,7 @@ class WanModel(ModelMixin, ConfigMixin):
             # blocks
             self.blocks = nn.ModuleList([
                 WanAttentionBlock('t2v_cross_attn', self.dim, self.ffn_dim, self.num_heads, self.window_size, self.qk_norm,
-                                    self.cross_attn_norm, self.eps,
+                                    self.cross_attn_norm, self.eps, block_no =i,
                                     block_id=self.vace_layers_mapping[i] if i in self.vace_layers else None)
                 for i in range(self.num_layers)
             ])
@@ -742,53 +848,59 @@ class WanModel(ModelMixin, ConfigMixin):
                 block.projector.weight = nn.Parameter(torch.eye(dim))
                 block.projector.bias = nn.Parameter(torch.zeros(dim))            
 
+        if fantasytalking_dim > 0:
+            from fantasytalking.model import WanCrossAttentionProcessor
+            for block in self.blocks:
+                block.cross_attn.processor = WanCrossAttentionProcessor(fantasytalking_dim, dim)
 
-    def lock_layers_dtypes(self,  dtype = torch.float32, force = False):
-        count = 0
-        layer_list = [self.head, self.head.head, self.patch_embedding, self.time_embedding, self.time_embedding[0], self.time_embedding[2], 
-                      self.time_projection, self.time_projection[1]] #, self.text_embedding, self.text_embedding[0], self.text_embedding[2] ]
+
+    def lock_layers_dtypes(self, hybrid_dtype = None, dtype = torch.float32):
+        layer_list = [self.head, self.head.head, self.patch_embedding]
+        target_dype= dtype
+        
+        layer_list2 = [ self.time_embedding, self.time_embedding[0], self.time_embedding[2], 
+                    self.time_projection, self.time_projection[1]] #, self.text_embedding, self.text_embedding[0], self.text_embedding[2] ]
+
+        for block in self.blocks:
+            layer_list2 += [block.norm3]
+
         if hasattr(self, "fps_embedding"):
-            layer_list += [self.fps_embedding, self.fps_projection, self.fps_projection[0], self.fps_projection[2]]
+            layer_list2 += [self.fps_embedding, self.fps_projection, self.fps_projection[0], self.fps_projection[2]]
 
         if hasattr(self, "vace_patch_embedding"):
-            layer_list += [self.vace_patch_embedding]
-            layer_list += [self.vace_blocks[0].before_proj]
+            layer_list2 += [self.vace_patch_embedding]
+            layer_list2 += [self.vace_blocks[0].before_proj]
             for block in self.vace_blocks:
-                layer_list += [block.after_proj, block.norm3]
+                layer_list2 += [block.after_proj, block.norm3]
+
+        target_dype2 = hybrid_dtype if hybrid_dtype != None else dtype 
 
         # cam master
         if hasattr(self.blocks[0], "projector"):
             for block in self.blocks:
-                layer_list += [block.projector]
+                layer_list2 += [block.projector]
 
-        for block in self.blocks:
-            layer_list += [block.norm3]
-        for layer in layer_list:
-            if hasattr(layer, "weight"):
-                if layer.weight.dtype == dtype  :
-                    count += 1
-                elif force:
-                    if hasattr(layer, "weight"):
-                        layer.weight.data = layer.weight.data.to(dtype)
+        for current_layer_list, current_dtype in zip([layer_list, layer_list2], [target_dype, target_dype2]):
+            for layer in current_layer_list:
+                layer._lock_dtype = dtype
+
+                if hasattr(layer, "weight") and layer.weight.dtype != current_dtype :
+                    layer.weight.data = layer.weight.data.to(current_dtype)
                     if hasattr(layer, "bias"):
-                        layer.bias.data = layer.bias.data.to(dtype)
-                    count += 1
+                        layer.bias.data = layer.bias.data.to(current_dtype)
 
-            layer._lock_dtype = dtype 
-
-
-        if count > 0:
-            self._lock_dtype = dtype
+        self._lock_dtype = dtype
 
 
     def compute_teacache_threshold(self, start_step, timesteps = None, speed_factor =0): 
-        rescale_func = np.poly1d(self.coefficients)         
+        modulation_dtype = self.time_projection[1].weight.dtype
+        rescale_func = np.poly1d(self.coefficients)
         e_list = []
         for t in timesteps:
             t = torch.stack([t])
-            time_emb =  self.time_embedding( sinusoidal_embedding_1d(self.freq_dim, t.flatten()).to(self.patch_embedding.weight.dtype) )  # b, dim   
+            time_emb =  self.time_embedding( sinusoidal_embedding_1d(self.freq_dim, t.flatten()).to(modulation_dtype) )  # b, dim   
             e_list.append(time_emb)
-	
+        best_deltas = None
         best_threshold = 0.01
         best_diff = 1000
         best_signed_diff = 1000
@@ -798,12 +910,16 @@ class WanModel(ModelMixin, ConfigMixin):
             accumulated_rel_l1_distance =0
             nb_steps = 0
             diff = 1000
+            deltas = []
             for i, t in enumerate(timesteps):
                 skip = False    
-                if not (i<=start_step or i== len(timesteps)):
-                    accumulated_rel_l1_distance += abs(rescale_func(((e_list[i]-e_list[i-1]).abs().mean() / e_list[i-1].abs().mean()).cpu().item()))
+                if not (i<=start_step or i== len(timesteps)-1):
+                    delta = abs(rescale_func(((e_list[i]-e_list[i-1]).abs().mean() / e_list[i-1].abs().mean()).cpu().item()))
+                    # deltas.append(delta)
+                    accumulated_rel_l1_distance += delta
                     if accumulated_rel_l1_distance < threshold:
                         skip = True
+                        # deltas.append("SKIP")
                     else:
                         accumulated_rel_l1_distance = 0
                 if not skip:
@@ -812,6 +928,7 @@ class WanModel(ModelMixin, ConfigMixin):
                     diff = abs(signed_diff)  
             if diff < best_diff:
                 best_threshold = threshold
+                best_deltas = deltas
                 best_diff = diff
                 best_signed_diff = signed_diff
             elif diff > best_diff:
@@ -819,6 +936,7 @@ class WanModel(ModelMixin, ConfigMixin):
             threshold += 0.01
         self.rel_l1_thresh = best_threshold
         print(f"Tea Cache, best threshold found:{best_threshold:0.2f} with gain x{len(timesteps)/(target_nb_steps - best_signed_diff):0.2f} for a target of x{speed_factor}")
+        # print(f"deltas:{best_deltas}")
         return best_threshold
 
     
@@ -828,13 +946,13 @@ class WanModel(ModelMixin, ConfigMixin):
         t,
         context,
         vace_context = None,
-        vace_context_scale=1.0,        
+        vace_context_scale=[1.0],        
         clip_fea=None,
         y=None,
         freqs = None,
         pipeline = None,
         current_step = 0,
-        is_uncond=False,
+        x_id= 0,
         max_steps = 0, 
         slg_layers=None,
         callback = None,
@@ -842,10 +960,13 @@ class WanModel(ModelMixin, ConfigMixin):
         fps = None,
         causal_block_size = 1,
         causal_attention = False,
-        x_neg = None
+        audio_proj=None,
+        audio_context_lens=None,
+        audio_scale=None,
+
     ):
-        # dtype =  self.blocks[0].self_attn.q.weight.dtype 
-        dtype =  self.patch_embedding.weight.dtype
+        # patch_dtype =  self.patch_embedding.weight.dtype
+        modulation_dtype = self.time_projection[1].weight.dtype
 
         if self.model_type == 'i2v':
             assert clip_fea is not None and y is not None
@@ -854,20 +975,41 @@ class WanModel(ModelMixin, ConfigMixin):
         if torch.is_tensor(freqs) and freqs.device != device:
             freqs = freqs.to(device)
 
-        if y is not None:
-            x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
+        chipmunk = offload.shared_state.get("_chipmunk", False) 
+        if chipmunk:
+            # from chipmunk.ops.voxel import voxel_chunk_no_padding, reverse_voxel_chunk_no_padding
+            voxel_shape = (4, 6, 8)
 
-        # embeddings
-        x = [self.patch_embedding(u.unsqueeze(0)).to(dtype) for u in x] 
-        if x_neg !=None:
-            x_neg = [self.patch_embedding(u.unsqueeze(0)).to(dtype) for u in x_neg] 
+        x_list = x
+        joint_pass = len(x_list) > 1
+        is_source_x = [ x.data_ptr() == x_list[0].data_ptr() and i > 0 for i, x in enumerate(x_list) ]
+        last_x_idx  = 0
+        for i, (is_source, x) in enumerate(zip(is_source_x, x_list)):
+            if is_source:
+                x_list[i] = x_list[0].clone()
+                last_x_idx = i
+            else:
+                # image source                
+                if y is not None:
+                    x = torch.cat([x, y], dim=0)
+                # embeddings
+                x = self.patch_embedding(x.unsqueeze(0)).to(modulation_dtype)
+                grid_sizes = x.shape[2:]
+                if chipmunk:
+                    x = x.unsqueeze(-1)
+                    x_og_shape = x.shape
+                    x = voxel_chunk_no_padding(x, voxel_shape).squeeze(-1).transpose(1, 2)
+                else:
+                    x = x.flatten(2).transpose(1, 2)
+                x_list[i] = x
+        x, y = None, None
 
-        grid_sizes = [ list(u.shape[2:]) for u in x]
-        embed_sizes = grid_sizes[0]
-        if causal_attention : #causal_block_size > 0:
-            frame_num = embed_sizes[0]
-            height = embed_sizes[1]
-            width = embed_sizes[2]
+
+        block_mask = None
+        if causal_attention and causal_block_size > 0 and False: # NEVER WORKED
+            frame_num = grid_sizes[0]
+            height = grid_sizes[1]
+            width = grid_sizes[2]
             block_num = frame_num // causal_block_size
             range_tensor = torch.arange(block_num).view(-1, 1)
             range_tensor = range_tensor.repeat(1, causal_block_size).flatten()
@@ -878,30 +1020,21 @@ class WanModel(ModelMixin, ConfigMixin):
             block_mask = causal_mask.unsqueeze(0).unsqueeze(0)
             del causal_mask
 
-        offload.shared_state["embed_sizes"] = embed_sizes 
+        offload.shared_state["embed_sizes"] = grid_sizes 
         offload.shared_state["step_no"] = current_step 
         offload.shared_state["max_steps"] = max_steps
 
-        x = [u.flatten(2).transpose(1, 2) for u in x]
-        x = x[0]
-        if x_neg !=None:
-            x_neg = [u.flatten(2).transpose(1, 2) for u in x_neg]
-            x_neg = x_neg[0]
+        _flag_df = t.dim() == 2
 
-        if t.dim() == 2:
-            b, f = t.shape
-            _flag_df = True
-        else:
-            _flag_df = False
         e = self.time_embedding(
-            sinusoidal_embedding_1d(self.freq_dim, t.flatten()).to(dtype)  # self.patch_embedding.weight.dtype)
+            sinusoidal_embedding_1d(self.freq_dim, t.flatten()).to(modulation_dtype)  # self.patch_embedding.weight.dtype)
         )  # b, dim        
         e0 = self.time_projection(e).unflatten(1, (6, self.dim)).to(e.dtype)
 
         if self.inject_sample_info:
             fps = torch.tensor(fps, dtype=torch.long, device=device)
 
-            fps_emb = self.fps_embedding(fps).to(dtype) # float()
+            fps_emb = self.fps_embedding(fps).to(e.dtype) 
             if _flag_df:
                 e0 = e0 + self.fps_projection(fps_emb).unflatten(1, (6, self.dim)).repeat(t.shape[1], 1, 1)
             else:
@@ -913,53 +1046,50 @@ class WanModel(ModelMixin, ConfigMixin):
         if clip_fea is not None:
             context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
             context = [ torch.cat( [context_clip, u ], dim=1 ) for u in context  ] 
-        
-        joint_pass = len(context) > 0 
-        x_list = [x]
-        if joint_pass:
-            if x_neg == None:
-                x_list +=  [x.clone() for i in  range(len(context) - 1) ]
-            else:
-                x_list +=  [x.clone() for i in  range(len(context) - 2) ] + [x_neg]
-            is_uncond = False
-        del x
+
         context_list = context
+        if audio_scale != None: 
+            audio_scale_list = audio_scale
+        else:
+            audio_scale_list = [None] * len(x_list)
 
             # arguments
 
         kwargs = dict(
             grid_sizes=grid_sizes,
             freqs=freqs,
-            cam_emb = cam_emb
+            cam_emb = cam_emb,
+            block_mask = block_mask,
+            audio_proj=audio_proj,
+            audio_context_lens=audio_context_lens,
             )
 
         if vace_context == None:
             hints_list = [None ] *len(x_list)
         else:
-            # embeddings
-            c = [self.vace_patch_embedding(u.unsqueeze(0)) for u in vace_context]
+            # Vace embeddings
+            c = [self.vace_patch_embedding(u.to(self.vace_patch_embedding.weight.dtype).unsqueeze(0)) for u in vace_context]
             c = [u.flatten(2).transpose(1, 2) for u in c]
-            c = c[0]
- 
             kwargs['context_scale'] = vace_context_scale
-            hints_list = [ [c] for _ in range(len(x_list)) ] 
+            hints_list = [ [ [sub_c] for sub_c in c] for _ in range(len(x_list)) ] 
             del c
 
         should_calc = True
-        if self.enable_teacache: 
-            if is_uncond:
+        if self.enable_cache: 
+            if x_id != 0:
                 should_calc = self.should_calc
             else:
-                if current_step <= self.teacache_start_step or current_step == self.num_steps-1:
+                if current_step <= self.cache_start_step or current_step == self.num_steps-1:
                     should_calc = True
                     self.accumulated_rel_l1_distance = 0
                 else:
                     rescale_func = np.poly1d(self.coefficients)
-                    self.accumulated_rel_l1_distance += abs(rescale_func(((e-self.previous_modulated_input).abs().mean() / self.previous_modulated_input.abs().mean()).cpu().item()))
+                    delta = abs(rescale_func(((e-self.previous_modulated_input).abs().mean() / self.previous_modulated_input.abs().mean()).cpu().item()))
+                    self.accumulated_rel_l1_distance += delta
                     if self.accumulated_rel_l1_distance < self.rel_l1_thresh:
                         should_calc = False
                         self.teacache_skipped_steps += 1
-                        # print(f"Teacache Skipped Step:{self.teacache_skipped_steps}/{current_step}" )
+                        # print(f"Teacache Skipped Step no {current_step} ({self.teacache_skipped_steps}/{current_step}), delta={delta}" )
                     else:
                         should_calc = True
                         self.accumulated_rel_l1_distance = 0
@@ -967,15 +1097,23 @@ class WanModel(ModelMixin, ConfigMixin):
                 self.should_calc = should_calc                        
 
         if not should_calc:
-            for i, x in enumerate(x_list):
-                x += self.previous_residual_uncond if i==1 or is_uncond else self.previous_residual_cond                              
+            if joint_pass:
+                for i, x in enumerate(x_list):
+                    x += self.previous_residual[i]
+            else:
+                x = x_list[0]
+                x += self.previous_residual[x_id]
+            x = None
         else:
-            if self.enable_teacache:
-                if joint_pass or is_uncond:
-                    self.previous_residual_uncond = None
-                if joint_pass or not is_uncond:
-                    self.previous_residual_cond = None
-                ori_hidden_states = x_list[0].clone()
+            if self.enable_cache:
+                if joint_pass:
+                    self.previous_residual = [ None ] * len(self.previous_residual)
+                else:
+                    self.previous_residual[x_id] = None
+                ori_hidden_states = [ None ] * len(x_list)
+                ori_hidden_states[0] = x_list[0].clone()
+                for i in range(1, len(x_list)):
+                    ori_hidden_states[i] = ori_hidden_states[0] if is_source_x[i] else x_list[i].clone()  
             
             for block_idx, block in enumerate(self.blocks):
                 offload.shared_state["layer"] = block_idx
@@ -984,32 +1122,37 @@ class WanModel(ModelMixin, ConfigMixin):
                 if pipeline._interrupt:
                     return [None] * len(x_list)
 
-                if slg_layers is not None and block_idx in slg_layers:
-                    if is_uncond and not joint_pass:
+                if (x_id != 0 or joint_pass) and slg_layers is not None and block_idx in slg_layers:
+                    if not joint_pass:
                         continue
                     x_list[0] = block(x_list[0], context = context_list[0], e= e0, **kwargs)
-
                 else:
-                    for i, (x, context, hints) in enumerate(zip(x_list, context_list, hints_list)):
-                        x_list[i] = block(x, context = context, hints= hints, e= e0, **kwargs)
+                    for i, (x, context, hints, audio_scale) in enumerate(zip(x_list, context_list, hints_list, audio_scale_list)):
+                        x_list[i] = block(x, context = context, hints= hints, audio_scale= audio_scale, e= e0, **kwargs)
                         del x
                     del context, hints
 
-            if self.enable_teacache:
+            if self.enable_cache:
                 if joint_pass:
-                    self.previous_residual_cond = torch.sub(x_list[0], ori_hidden_states)
-                    self.previous_residual_uncond = ori_hidden_states
-                    torch.sub(x_list[1], ori_hidden_states, out=self.previous_residual_uncond)
+                    for i, (x, ori, is_source) in enumerate(zip(x_list, ori_hidden_states, is_source_x)) :
+                        if i == 0 or is_source and i != last_x_idx  :
+                            self.previous_residual[i] = torch.sub(x, ori) 
+                        else:
+                            self.previous_residual[i] = ori
+                            torch.sub(x, ori, out=self.previous_residual[i]) 
+                        ori_hidden_states[i] = None
+                        x , ori = None, None
                 else:
-                    residual = ori_hidden_states # just to have a readable code
-                    torch.sub(x_list[0], ori_hidden_states, out=residual)
-                    if i==1 or is_uncond:
-                        self.previous_residual_uncond = residual
-                    else:
-                        self.previous_residual_cond = residual
+                    residual = ori_hidden_states[0] # just to have a readable code
+                    torch.sub(x_list[0], ori_hidden_states[0], out=residual)
+                    self.previous_residual[x_id] = residual
                 residual, ori_hidden_states = None, None
 
         for i, x in enumerate(x_list):
+            if chipmunk:
+                x = reverse_voxel_chunk_no_padding(x.transpose(1, 2).unsqueeze(-1), x_og_shape, voxel_shape).squeeze(-1)
+                x = x.flatten(2).transpose(1, 2)
+
             # head
             x = self.head(x, e)
 
@@ -1037,10 +1180,10 @@ class WanModel(ModelMixin, ConfigMixin):
 
         c = self.out_dim
         out = []
-        for u, v in zip(x, grid_sizes):
-            u = u[:math.prod(v)].view(*v, *self.patch_size, c)
+        for u in x:
+            u = u[:math.prod(grid_sizes)].view(*grid_sizes, *self.patch_size, c)
             u = torch.einsum('fhwpqrc->cfphqwr', u)
-            u = u.reshape(c, *[i * j for i, j in zip(v, self.patch_size)])
+            u = u.reshape(c, *[i * j for i, j in zip(grid_sizes, self.patch_size)])
             out.append(u)
         return out
 

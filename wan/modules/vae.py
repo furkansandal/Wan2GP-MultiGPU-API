@@ -33,9 +33,27 @@ class CausalConv3d(nn.Conv3d):
             padding[4] -= cache_x.shape[2]
             cache_x = None
         x = F.pad(x, padding)
-        x = super().forward(x)
-
-        return x
+        try:
+            out = super().forward(x)
+            return out
+        except RuntimeError as e:
+            if "miopenStatus" in str(e):
+                print("⚠️ MIOpen fallback: AMD gets upset when trying to work with large areas, and so CPU will be "
+                      "used for this decoding (which is very slow). Consider using tiled VAE Decoding.")
+                x_cpu = x.float().cpu()
+                weight_cpu = self.weight.float().cpu()
+                bias_cpu = self.bias.float().cpu() if self.bias is not None else None
+                print(f"[Fallback] x shape: {x_cpu.shape}, weight shape: {weight_cpu.shape}")
+                out = F.conv3d(x_cpu, weight_cpu, bias_cpu,
+                               self.stride, (0, 0, 0),  # avoid double padding here
+                               self.dilation, self.groups)
+                out = out.to(x.device)
+                if x.dtype in (torch.float16, torch.bfloat16):
+                    out = out.half()
+                if x.dtype != out.dtype:
+                    out = out.to(x.dtype)
+                return out
+            raise
 
 
 class RMS_norm(nn.Module):
@@ -784,7 +802,32 @@ class WanVAE:
             pretrained_path=vae_pth,
             z_dim=z_dim,
         ).to(dtype).eval() #.requires_grad_(False).to(device)
-    
+        self.model._model_dtype = dtype
+
+    @staticmethod
+    def get_VAE_tile_size(vae_config, device_mem_capacity, mixed_precision):
+        # VAE Tiling
+        if vae_config == 0:
+            if mixed_precision:
+                device_mem_capacity = device_mem_capacity / 2
+            if device_mem_capacity >= 24000:
+                use_vae_config = 1            
+            elif device_mem_capacity >= 8000:
+                use_vae_config = 2
+            else:          
+                use_vae_config = 3
+        else:
+            use_vae_config = vae_config
+
+        if use_vae_config == 1:
+            VAE_tile_size = 0  
+        elif use_vae_config == 2:
+            VAE_tile_size = 256  
+        else: 
+            VAE_tile_size = 128  
+
+        return  VAE_tile_size
+
     def encode(self, videos, tile_size = 256, any_end_frame = False):
         """
         videos: A list of videos each with shape [C, T, H, W].

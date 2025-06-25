@@ -3,8 +3,8 @@
 import math
 import numpy as np
 import matplotlib
-import cv2
-
+import cv2  
+matplotlib.use('Agg')
 
 eps = 0.01
 

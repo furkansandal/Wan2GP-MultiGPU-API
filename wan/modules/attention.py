@@ -4,6 +4,8 @@ from importlib.metadata import version
 from mmgp import offload
 import torch.nn.functional as F
 
+major, minor = torch.cuda.get_device_capability(None)
+bfloat16_supported =  major >= 8 
 
 try:
     from xformers.ops import memory_efficient_attention
@@ -56,22 +58,15 @@ def sageattn_wrapper(
         attention_length
     ):
     q,k, v = qkv_list
-    padding_length = q.shape[0] -attention_length
-    q = q[:attention_length, :, : ].unsqueeze(0)
-    k = k[:attention_length, :, : ].unsqueeze(0)
-    v = v[:attention_length, :, : ].unsqueeze(0)
     if True:
         qkv_list = [q,k,v]
         del q, k ,v
-        o = alt_sageattn(qkv_list, tensor_layout="NHD").squeeze(0)
+        o = alt_sageattn(qkv_list, tensor_layout="NHD")
     else:
-        o = sageattn(q, k, v, tensor_layout="NHD").squeeze(0)
+        o = sageattn(q, k, v, tensor_layout="NHD")
         del q, k ,v
 
     qkv_list.clear()
-
-    if padding_length > 0:
-        o = torch.cat([o, torch.empty( (padding_length, *o.shape[-2:]), dtype= o.dtype, device=o.device  ) ], 0)
 
     return o
 
@@ -104,22 +99,19 @@ def sageattn_wrapper(
 @torch.compiler.disable()
 def sdpa_wrapper(
         qkv_list,
-        attention_length
+        attention_length,
+        attention_mask = None        
     ):
-    q,k, v = qkv_list
-    padding_length = q.shape[0] -attention_length
-    q = q[:attention_length, :].transpose(0,1).unsqueeze(0)
-    k = k[:attention_length, :].transpose(0,1).unsqueeze(0)
-    v = v[:attention_length, :].transpose(0,1).unsqueeze(0)
+    q, k, v = qkv_list
 
-    o = F.scaled_dot_product_attention(
-        q, k, v, attn_mask=None, is_causal=False
-    ).squeeze(0).transpose(0,1)
+    q = q.transpose(1,2)
+    k = k.transpose(1,2)
+    v = v.transpose(1,2)
+    if attention_mask != None:
+        attention_mask = attention_mask.transpose(1,2)
+    o = F.scaled_dot_product_attention( q, k, v, attn_mask=attention_mask, is_causal=False).transpose(1,2)
     del q, k ,v
     qkv_list.clear()
-
-    if padding_length > 0:
-        o = torch.cat([o, torch.empty( (padding_length, *o.shape[-2:]), dtype= o.dtype, device=o.device  ) ], 0)
 
     return o
 
@@ -142,6 +134,11 @@ def get_supported_attention_modes():
     if not sage2_supported:
         if "sage2" in ret:
             ret.remove("sage2")
+
+    major, minor = torch.cuda.get_device_capability()
+    if  major < 7:
+        if "sage" in ret:
+            ret.remove("sage")
     return ret
 
 __all__ = [
@@ -149,7 +146,19 @@ __all__ = [
     'attention',
 ]
 
+def get_cu_seqlens(batch_size, lens, max_len):
+    cu_seqlens = torch.zeros([2 * batch_size + 1], dtype=torch.int32, device="cuda")
 
+    for i in range(batch_size):
+        s = lens[i] 
+        s1 = i * max_len + s
+        s2 = (i + 1) * max_len
+        cu_seqlens[2 * i + 1] = s1
+        cu_seqlens[2 * i + 2] = s2
+
+    return cu_seqlens
+
+@torch.compiler.disable()
 def pay_attention(
     qkv_list,
     dropout_p=0.,
@@ -159,27 +168,78 @@ def pay_attention(
     deterministic=False,
     version=None,
     force_attention= None,
-    cross_attn= False
+    attention_mask = None,
+    cross_attn= False,
+    q_lens = None,
+    k_lens = None,
 ):
-
+    # format : torch.Size([batches, tokens, heads, head_features])
+    # assume if q_lens is non null, each q is padded up to lq (one q out of two will need to be discarded or ignored)
+    # assume if k_lens is non null, each k is padded up to lk (one k out of two will need to be discarded or ignored)
+    if attention_mask != None:
+        force_attention = "sdpa"
+        if  attention_mask.dtype == torch.bfloat16 and not bfloat16_supported:
+            attention_mask = attention_mask.to(torch.float16)
     attn = offload.shared_state["_attention"] if force_attention== None else force_attention
+
     q,k,v = qkv_list
     qkv_list.clear()
-
-
-    # params
-    b, lq, lk, out_dtype = q.size(0), q.size(1), k.size(1), q.dtype
-    assert b==1
-    q = q.squeeze(0)
-    k = k.squeeze(0)
-    v = v.squeeze(0)
-
+    out_dtype = q.dtype
+    if  q.dtype == torch.bfloat16 and not bfloat16_supported:
+        q = q.to(torch.float16)
+        k = k.to(torch.float16)
+        v = v.to(torch.float16)
+    final_padding = 0
+    b, lq, lk = q.size(0), q.size(1), k.size(1)
 
     q = q.to(v.dtype)
     k = k.to(v.dtype)
 
-    # if q_scale is not None:
-    #     q = q * q_scale
+    if attn == "chipmunk":
+        from src.chipmunk.modules import SparseDiffMlp, SparseDiffAttn
+        from src.chipmunk.util import LayerCounter, GLOBAL_CONFIG
+
+    if b > 1 and k_lens != None and attn in ("sage2", "sdpa"):
+        assert attention_mask == None
+        # Poor's man var k len attention
+        assert q_lens == None
+        chunk_sizes = []
+        k_sizes = []
+        current_size = k_lens[0]
+        current_count= 1
+        for k_len in k_lens[1:]:
+            if k_len == current_size:
+                current_count += 1
+            else:
+                chunk_sizes.append(current_count)
+                k_sizes.append(current_size)
+                current_count = 1
+                current_size = k_len
+        chunk_sizes.append(current_count)
+        k_sizes.append(k_len)
+        if len(chunk_sizes) > 1 or k_lens[0] != k.shape[1]:
+            q_chunks =torch.split(q, chunk_sizes)
+            k_chunks =torch.split(k, chunk_sizes)
+            v_chunks =torch.split(v, chunk_sizes)
+            q, k, v = None, None, None
+            k_chunks = [ u[:, :sz] for u, sz in zip(k_chunks, k_sizes)]
+            v_chunks = [ u[:, :sz] for u, sz in zip(v_chunks, k_sizes)]
+            o = []
+            for sub_q, sub_k, sub_v in zip(q_chunks, k_chunks, v_chunks): 
+                qkv_list = [sub_q, sub_k, sub_v]
+                sub_q, sub_k, sub_v = None, None, None
+                o.append( pay_attention(qkv_list) )
+            q_chunks, k_chunks, v_chunks = None, None, None
+            o = torch.cat(o, dim = 0)
+            return o
+    elif (q_lens != None or k_lens != None) and attn in ("sage2", "sdpa"):
+        assert b == 1
+        szq = q_lens[0].item() if q_lens != None else lq
+        szk = k_lens[0].item() if k_lens != None else lk
+        final_padding = lq - szq
+        q = q[:, :szq]
+        k = k[:, :szk]
+        v = v[:, :szk]
 
     if version is not None and version == 3 and not FLASH_ATTN_3_AVAILABLE:
         warnings.warn(
@@ -187,8 +247,29 @@ def pay_attention(
         )
 
     if attn=="sage" or attn=="flash":
-        cu_seqlens_q = torch.tensor([0, lq], dtype=torch.int32, device="cuda")
-        cu_seqlens_k = torch.tensor([0, lk], dtype=torch.int32, device="cuda")
+        if b != 1 :
+            if k_lens == None:
+                k_lens = torch.tensor( [lk] * b, dtype=torch.int32).to(device=q.device, non_blocking=True)
+            if q_lens == None:
+                q_lens = torch.tensor([lq] * b, dtype=torch.int32).to(device=q.device, non_blocking=True)
+            k = k.reshape(-1, *k.shape[-2:])
+            v = v.reshape(-1, *v.shape[-2:])
+            q = q.reshape(-1, *q.shape[-2:])
+            cu_seqlens_q=get_cu_seqlens(b, q_lens, lq) 
+            cu_seqlens_k=get_cu_seqlens(b, k_lens, lk) 
+        else:
+            szq = q_lens[0].item() if q_lens != None else lq
+            szk = k_lens[0].item() if k_lens != None else lk
+            if szq != lq or szk != lk:
+                cu_seqlens_q = torch.tensor([0, szq, lq], dtype=torch.int32, device="cuda")
+                cu_seqlens_k = torch.tensor([0, szk, lk], dtype=torch.int32, device="cuda")
+            else:
+                cu_seqlens_q = torch.tensor([0, lq], dtype=torch.int32, device="cuda")
+                cu_seqlens_k = torch.tensor([0, lk], dtype=torch.int32, device="cuda")
+            q = q.squeeze(0)
+            k = k.squeeze(0)
+            v = v.squeeze(0)
+
 
     # apply attention
     if attn=="sage":
@@ -207,7 +288,7 @@ def pay_attention(
             qkv_list = [q,k,v]
             del q,k,v
 
-            x = sageattn_wrapper(qkv_list, lq).unsqueeze(0)
+            x = sageattn_wrapper(qkv_list, lq) #.unsqueeze(0)
         # else:
         #     layer =  offload.shared_state["layer"]
         #     embed_sizes = offload.shared_state["embed_sizes"] 
@@ -267,8 +348,8 @@ def pay_attention(
         
     elif attn=="sdpa":
         qkv_list = [q, k, v]
-        del q, k , v
-        x = sdpa_wrapper( qkv_list, lq).unsqueeze(0)
+        del q ,k ,v
+        x = sdpa_wrapper( qkv_list, lq, attention_mask = attention_mask) #.unsqueeze(0)
     elif attn=="flash" and version == 3:
         # Note: dropout_p, window_size are not supported in FA3 now.
         x = flash_attn_interface.flash_attn_varlen_func(
@@ -302,59 +383,22 @@ def pay_attention(
     # output
 
     elif attn=="xformers":
-        x = memory_efficient_attention(
-            q.unsqueeze(0),
-            k.unsqueeze(0),
-            v.unsqueeze(0),
-        ) #.unsqueeze(0)    
-    
-    return x.type(out_dtype)
+        from xformers.ops.fmha.attn_bias import BlockDiagonalPaddedKeysMask
+        if k_lens == None and q_lens == None:
+            x = memory_efficient_attention(q, k, v )
+        elif k_lens != None and q_lens == None:
+            attn_mask = BlockDiagonalPaddedKeysMask.from_seqlens([lq] * b , lk , list(k_lens) ) 
+            x = memory_efficient_attention(q, k, v, attn_bias= attn_mask )
+        elif b == 1:
+            szq = q_lens[0].item() if q_lens != None else lq
+            szk = k_lens[0].item() if k_lens != None else lk
+            attn_mask = BlockDiagonalPaddedKeysMask.from_seqlens([szq, lq - szq ] , lk , [szk, 0] ) 
+            x = memory_efficient_attention(q, k, v, attn_bias= attn_mask )
+        else:
+            assert False
+    x = x.type(out_dtype)
+    if final_padding > 0:
+        x = torch.cat([x, torch.empty( (x.shape[0], final_padding, *x.shape[-2:]), dtype= x.dtype, device=x.device  ) ], 1)
 
 
-def attention(
-    q,
-    k,
-    v,
-    q_lens=None,
-    k_lens=None,
-    dropout_p=0.,
-    softmax_scale=None,
-    q_scale=None,
-    causal=False,
-    window_size=(-1, -1),
-    deterministic=False,
-    dtype=torch.bfloat16,
-    fa_version=None,
-):
-    if FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE:
-        return pay_attention(
-            q=q,
-            k=k,
-            v=v,
-            q_lens=q_lens,
-            k_lens=k_lens,
-            dropout_p=dropout_p,
-            softmax_scale=softmax_scale,
-            q_scale=q_scale,
-            causal=causal,
-            window_size=window_size,
-            deterministic=deterministic,
-            dtype=dtype,
-            version=fa_version,
-        )
-    else:
-        if q_lens is not None or k_lens is not None:
-            warnings.warn(
-                'Padding mask is disabled when using scaled_dot_product_attention. It can have a significant impact on performance.'
-            )
-        attn_mask = None
-
-        q = q.transpose(1, 2).to(dtype)
-        k = k.transpose(1, 2).to(dtype)
-        v = v.transpose(1, 2).to(dtype)
-
-        out = torch.nn.functional.scaled_dot_product_attention(
-            q, k, v, attn_mask=attn_mask, is_causal=causal, dropout_p=dropout_p)
-
-        out = out.transpose(1, 2).contiguous()
-        return out
+    return x 

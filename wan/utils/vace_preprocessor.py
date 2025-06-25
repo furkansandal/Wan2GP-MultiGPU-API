@@ -5,6 +5,7 @@ from PIL import Image
 import torch
 import torch.nn.functional as F
 import torchvision.transforms.functional as TF
+from .utils import calculate_new_dimensions
 
 
 class VaceImageProcessor(object):
@@ -182,53 +183,22 @@ class VaceVideoProcessor(object):
 
 
         
-    def _get_frameid_bbox_adjust_last(self, fps, video_frames_count, h, w, crop_box, rng, max_frames= 0, start_frame =0):
+    def _get_frameid_bbox_adjust_last(self, fps, video_frames_count, canvas_height, canvas_width, h, w,  fit_into_canvas, crop_box, rng, max_frames= 0, start_frame =0):
         from wan.utils.utils import resample
 
         target_fps = self.max_fps
-
-        # video_frames_count = len(frame_timestamps)
 
         frame_ids= resample(fps, video_frames_count, max_frames, target_fps, start_frame )
 
         x1, x2, y1, y2 = [0, w, 0, h] if crop_box is None else crop_box
         h, w = y2 - y1, x2 - x1
-        ratio = h / w
-        df, dh, dw = self.downsample
-        seq_len  = self.seq_len
-        # min/max area of the [latent video]
-        min_area_z = self.min_area / (dh * dw)
-        # max_area_z = min(seq_len, self.max_area / (dh * dw), (h // dh) * (w // dw))
-        max_area_z = min_area_z # workaround bug
-        # sample a frame number of the [latent video]
-        rand_area_z = np.square(np.power(2, rng.uniform(
-            np.log2(np.sqrt(min_area_z)),
-            np.log2(np.sqrt(max_area_z))
-        )))
-
-        seq_len =  max_area_z * ((max_frames- start_frame - 1) // df +1)
-
-        # of = min(
-        #     (len(frame_ids) - 1) // df + 1,
-        #     int(seq_len / rand_area_z)
-        # )
-        of = (len(frame_ids) - 1) // df + 1
-
-             
-        # deduce target shape of the [latent video]
-        # target_area_z = min(max_area_z, int(seq_len / of))
-        target_area_z = max_area_z        
-        oh = round(np.sqrt(target_area_z * ratio))
-        ow = int(target_area_z / oh)
-        of = (of - 1) * df + 1
-        oh *= dh
-        ow *= dw
+        oh, ow = calculate_new_dimensions(canvas_height, canvas_width, h, w, fit_into_canvas)
 
         return frame_ids, (x1, x2, y1, y2), (oh, ow), target_fps
 
-    def _get_frameid_bbox(self, fps, video_frames_count, h, w, crop_box, rng, max_frames= 0, start_frame= 0):
+    def _get_frameid_bbox(self, fps, video_frames_count, h, w, crop_box, rng, max_frames= 0, start_frame= 0, canvas_height = 0, canvas_width = 0, fit_into_canvas= None):
         if self.keep_last:
-            return self._get_frameid_bbox_adjust_last(fps, video_frames_count, h, w, crop_box, rng, max_frames= max_frames, start_frame= start_frame)
+            return self._get_frameid_bbox_adjust_last(fps, video_frames_count, canvas_height, canvas_width, h, w, fit_into_canvas, crop_box, rng, max_frames= max_frames, start_frame= start_frame)
         else:
             return self._get_frameid_bbox_default(fps, video_frames_count, h, w, crop_box, rng, max_frames= max_frames)
 
@@ -238,23 +208,23 @@ class VaceVideoProcessor(object):
     def load_video_pair(self, data_key, data_key2, crop_box=None, seed=2024, **kwargs):
         return self.load_video_batch(data_key, data_key2, crop_box=crop_box, seed=seed, **kwargs)
 
-    def load_video_batch(self, *data_key_batch, crop_box=None, seed=2024, max_frames= 0, trim_video =0, start_frame = 0, **kwargs):
+    def load_video_batch(self, *data_key_batch, crop_box=None, seed=2024, max_frames= 0, trim_video =0, start_frame = 0, canvas_height = 0, canvas_width = 0, fit_into_canvas = None, **kwargs):
         rng = np.random.default_rng(seed + hash(data_key_batch[0]) % 10000)
         # read video
         import decord
         decord.bridge.set_bridge('torch')
         readers = []
-        src_video = None
+        src_videos = []
         for data_k in data_key_batch:
             if torch.is_tensor(data_k):
-                src_video = data_k
+                src_videos.append(data_k)
             else:
                 reader = decord.VideoReader(data_k)
                 readers.append(reader)
 
-        if src_video != None:
+        if len(src_videos) >0:
             fps = 16
-            length = src_video.shape[0] + start_frame
+            length = src_videos[0].shape[0] + start_frame
             if len(readers) > 0:
                 min_readers = min([len(r) for r in readers])
                 length = min(length, min_readers )
@@ -264,17 +234,17 @@ class VaceVideoProcessor(object):
         # frame_timestamps = [readers[0].get_frame_timestamp(i) for i in range(length)]
         # frame_timestamps = np.array(frame_timestamps, dtype=np.float32)
         max_frames = min(max_frames, trim_video) if trim_video > 0 else max_frames
-        if src_video != None:
-            src_video = src_video[:max_frames]
-            h, w = src_video.shape[1:3]
+        if len(src_videos) >0:
+            src_videos = [ src_video[:max_frames] for src_video in src_videos]
+            h, w = src_videos[0].shape[1:3]
         else:
             h, w = readers[0].next().shape[:2]
-        frame_ids, (x1, x2, y1, y2), (oh, ow), fps = self._get_frameid_bbox(fps, length, h, w, crop_box, rng, max_frames=max_frames, start_frame = start_frame )
+        frame_ids, (x1, x2, y1, y2), (oh, ow), fps = self._get_frameid_bbox(fps, length, h, w, crop_box, rng,  canvas_height = canvas_height, canvas_width = canvas_width, fit_into_canvas = fit_into_canvas,  max_frames=max_frames, start_frame = start_frame )
 
         # preprocess video
         videos = [reader.get_batch(frame_ids)[:, y1:y2, x1:x2, :] for reader in readers]
-        if src_video != None:
-            videos = [src_video] + videos
+        if len(src_videos) >0:
+            videos = src_videos + videos
         videos = [self._video_preprocess(video, oh, ow) for video in videos]
         return *videos, frame_ids, (oh, ow), fps
         # return videos if len(videos) > 1 else videos[0]

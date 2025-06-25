@@ -105,12 +105,6 @@ def load_i2v_model(model_filename, text_encoder_filename, is_720p):
         wan_model = wan.WanI2V(
             config=cfg,
             checkpoint_dir=DATA_DIR,
-            device_id=0,
-            rank=0,
-            t5_fsdp=False,
-            dit_fsdp=False,
-            use_usp=False,
-            i2v720p=True,
             model_filename=model_filename,
             text_encoder_filename=text_encoder_filename
         )
@@ -120,12 +114,6 @@ def load_i2v_model(model_filename, text_encoder_filename, is_720p):
         wan_model = wan.WanI2V(
             config=cfg,
             checkpoint_dir=DATA_DIR,
-            device_id=0,
-            rank=0,
-            t5_fsdp=False,
-            dit_fsdp=False,
-            use_usp=False,
-            i2v720p=False,
             model_filename=model_filename,
             text_encoder_filename=text_encoder_filename
         )
@@ -563,8 +551,8 @@ def main():
 
     # Setup tea cache if needed
     trans = wan_model.model
-    trans.enable_teacache = (args.teacache > 0)
-    if trans.enable_teacache:
+    trans.enable_cache = (args.teacache > 0)
+    if trans.enable_cache:
         if "480p" in args.transformer_file:
             # example from your code
             trans.coefficients = [-3.02331670e+02,  2.23948934e+02, -5.25463970e+01, 5.87348440e+00, -2.01973289e-01]
@@ -594,10 +582,10 @@ def main():
     enable_riflex = args.riflex
 
     # If teacache => reset counters
-    if trans.enable_teacache:
+    if trans.enable_cache:
         trans.teacache_counter = 0
         trans.teacache_multiplier = args.teacache
-        trans.teacache_start_step = int(args.teacache_start * args.steps / 100.0)
+        trans.cache_start_step = int(args.teacache_start * args.steps / 100.0)
         trans.num_steps = args.steps
         trans.teacache_skipped_steps = 0
         trans.previous_residual_uncond = None
@@ -624,10 +612,12 @@ def main():
     # Actually run the i2v generation
     try:
         sample_frames = wan_model.generate(
-            user_prompt,
-            input_img,
+            input_prompt = user_prompt,
+            image_start = input_img,
             frame_num=frame_count,
-            max_area=MAX_AREA_CONFIGS[f"{width}*{height}"],  # or you can pass your custom
+            width=width,
+            height=height,
+            # max_area=MAX_AREA_CONFIGS[f"{width}*{height}"],  # or you can pass your custom
             shift=args.flow_shift,
             sampling_steps=args.steps,
             guide_scale=args.guidance_scale,
@@ -665,7 +655,7 @@ def main():
         raise RuntimeError("No frames were returned (maybe generation was aborted or failed).")
 
     # If teacache was used, we can see how many steps were skipped
-    if trans.enable_teacache:
+    if trans.enable_cache:
         print(f"TeaCache skipped steps: {trans.teacache_skipped_steps} / {args.steps}")
 
     # Save result
