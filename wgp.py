@@ -1363,6 +1363,13 @@ def _parse_args():
         action="store_true",
         help="Vace ControlNet 1.3B model"
     )    
+    
+    parser.add_argument(
+        "--vace-14b-sf",
+        action="store_true",
+        help="Vace Self-Forcing 14B model (vace_14B_sf.json)"
+    )
+    
     parser.add_argument(
         "--i2v-1-3B",
         action="store_true",
@@ -1957,6 +1964,9 @@ if args.i2v_1_3B:
 
 if args.vace_1_3B: 
     transformer_type = "vace_1.3B"
+
+if args.vace_14b_sf:
+    transformer_type = "vace_14B"
 
 only_allow_edit_in_advanced = False
 lora_preselected_preset = args.lora_preset
