@@ -7,8 +7,8 @@
         ],
         "description": "This model is a combination of Vace and an advanced text-to-video generation model. This approach allows the model to generate videos with significantly fewer inference steps (4 or 8 steps) and without classifier-free guidance, substantially reducing video generation time while maintaining high quality outputs.",
         "URLs": [
-            "https://huggingface.co/DeepBeepMeep/Wan2.1/resolve/main/wan2.1_StepDistill-CfgDistill_14B_bf16.safetensors",
             "https://huggingface.co/DeepBeepMeep/Wan2.1/resolve/main/wan2.1_StepDistill-CfgDistill_14B_quanto_bf16_int8.safetensors",
+            "https://huggingface.co/DeepBeepMeep/Wan2.1/resolve/main/wan2.1_StepDistill-CfgDistill_14B_bf16.safetensors",
             "https://huggingface.co/DeepBeepMeep/Wan2.1/resolve/main/wan2.1_StepDistill-CfgDistill_14B_quanto_fp16_int8.safetensors"
         ],
 		"author": "https://huggingface.co/lightx2v/Wan2.1-T2V-14B-StepDistill-CfgDistill",
