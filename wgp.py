@@ -3598,7 +3598,7 @@ def generate_video(
                             preprocess_type = process_map.get(process_letter, "vace")
                         else:
                             preprocess_type2 = process_map.get(process_letter, None)
-                    process_names = { "pose": "Open Pose", "depth": "Depth Mask", "scribble" : "Shapes", "flow" : "Flow Map", "gray" : "Gray Levels", "inpaint" : "Inpaint Mask", "U": "Identity Mask", "vace" : "Vace Data"}
+                    process_names = { "pose": "Open Pose", "depth": "Depth Mask", "scribble" : "Shapes", "flow" : "Flow Map", "gray" : "Gray Levels", "inpaint" : "Inpaint Mask", "identity": "Identity Mask", "vace" : "Vace Data"}
                     status_info = "Extracting " + process_names[preprocess_type]
                     extra_process_list = ([] if preprocess_type2==None else [preprocess_type2]) + ([] if process_outside_mask==None or process_outside_mask == preprocess_type else [process_outside_mask])
                     if len(extra_process_list) == 1:
@@ -5501,7 +5501,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                         # 720p
                         ("1280x720 (16:9, 720p)", "1280x720"),
                         ("720x1280 (9:16, 720p)", "720x1280"), 
-                        ("1024x1024 (1:1, 720p)", "1024x024"),
+                        ("1024x1024 (1:1, 720p)", "1024x1024"),
                         ("1280x544 (21:9, 720p)", "1280x544"),
                         ("544x1280 (9:21, 720p)", "544x1280"),
                         ("1104x832 (4:3, 720p)", "1104x832"),
