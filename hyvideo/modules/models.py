@@ -494,7 +494,7 @@ class MMSingleStreamBlock(nn.Module):
 
 class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
     def preprocess_loras(self, model_type, sd):
-        if model_type != "i2v" :
+        if model_type != "hunyuan_i2v" :
             return sd
         new_sd = {}
         for k,v in sd.items():
@@ -797,6 +797,59 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
         for block in self.single_blocks:
             block.disable_deterministic()
 
+    def compute_magcache_threshold(self, start_step, num_inference_steps = 0, speed_factor =0):
+        def nearest_interp(src_array, target_length):
+            src_length = len(src_array)
+            if target_length == 1:
+                return np.array([src_array[-1]])
+            scale = (src_length - 1) / (target_length - 1)
+            mapped_indices = np.round(np.arange(target_length) * scale).astype(int)
+            return src_array[mapped_indices]
+        
+        if len(self.def_mag_ratios) != num_inference_steps:
+            self.mag_ratios = nearest_interp(self.def_mag_ratios, num_inference_steps)
+        else:
+            self.mag_ratios = self.def_mag_ratios
+
+        best_deltas = None
+        best_threshold = 0.01
+        best_diff = 1000
+        best_signed_diff = 1000
+        target_nb_steps= int(num_inference_steps / speed_factor)
+        threshold = 0.01
+        while threshold <= 0.6:
+            nb_steps = 0
+            diff = 1000
+            accumulated_err, accumulated_steps, accumulated_ratio = 0, 0, 1.0
+            for i in range(num_inference_steps):
+                if i<=start_step:
+                    skip  = False
+                else:
+                    cur_mag_ratio = self.mag_ratios[i] # conditional and unconditional in one list
+                    accumulated_ratio *= cur_mag_ratio # magnitude ratio between current step and the cached step
+                    accumulated_steps += 1 # skip steps plus 1
+                    cur_skip_err = np.abs(1-accumulated_ratio) # skip error of current steps
+                    accumulated_err += cur_skip_err # accumulated error of multiple steps
+                    if accumulated_err<threshold and accumulated_steps<=self.magcache_K:
+                        skip  = True
+                    else:
+                        skip  = False
+                        accumulated_err, accumulated_steps, accumulated_ratio = 0, 0, 1.0
+                if not skip:
+                    nb_steps += 1
+                    signed_diff = target_nb_steps - nb_steps               
+                    diff = abs(signed_diff)  
+            if diff < best_diff:
+                best_threshold = threshold
+                best_diff = diff
+                best_signed_diff = signed_diff
+            elif diff > best_diff:
+                break
+            threshold += 0.01
+        self.magcache_thresh = best_threshold
+        print(f"Mag Cache, best threshold found:{best_threshold:0.2f} with gain x{num_inference_steps/(target_nb_steps - best_signed_diff):0.2f} for a target of x{speed_factor}")
+        return best_threshold
+
     def forward(
         self,
         x: torch.Tensor,
@@ -925,25 +978,38 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
         if self.enable_cache:
             if x_id == 0:
                 self.should_calc = True
-                inp = img[0:1] 
-                vec_ = vec[0:1] 
-                ( img_mod1_shift, img_mod1_scale, _ , _ , _ , _ , ) = self.double_blocks[0].img_mod(vec_).chunk(6, dim=-1)
-                normed_inp = self.double_blocks[0].img_norm1(inp)
-                normed_inp = normed_inp.to(torch.bfloat16)
-                modulated_inp = modulate( normed_inp, shift=img_mod1_shift, scale=img_mod1_scale )
-                del normed_inp, img_mod1_shift, img_mod1_scale
-                if step_no <= self.cache_start_step or step_no == self.num_steps-1:
-                    self.accumulated_rel_l1_distance = 0
-                else: 
-                    coefficients = [7.33226126e+02, -4.01131952e+02,  6.75869174e+01, -3.14987800e+00, 9.61237896e-02]
-                    rescale_func = np.poly1d(coefficients)
-                    self.accumulated_rel_l1_distance += rescale_func(((modulated_inp-self.previous_modulated_input).abs().mean() / self.previous_modulated_input.abs().mean()).cpu().item())
-                    if self.accumulated_rel_l1_distance < self.rel_l1_thresh:
-                        self.should_calc = False
-                        self.teacache_skipped_steps += 1
-                    else:
+                if self.enable_cache == "mag":
+                    if step_no > self.cache_start_step:
+                        cur_mag_ratio = self.mag_ratios[step_no]
+                        self.accumulated_ratio = self.accumulated_ratio*cur_mag_ratio
+                        cur_skip_err = np.abs(1-self.accumulated_ratio)
+                        self.accumulated_err += cur_skip_err
+                        self.accumulated_steps += 1
+                        if self.accumulated_err<=self.magcache_thresh and self.accumulated_steps<=self.magcache_K:
+                            self.should_calc = False
+                            self.cache_skipped_steps += 1
+                        else:
+                            self.accumulated_ratio, self.accumulated_steps, self.accumulated_err = 1.0, 0, 0
+                else:
+                    inp = img[0:1] 
+                    vec_ = vec[0:1] 
+                    ( img_mod1_shift, img_mod1_scale, _ , _ , _ , _ , ) = self.double_blocks[0].img_mod(vec_).chunk(6, dim=-1)
+                    normed_inp = self.double_blocks[0].img_norm1(inp)
+                    normed_inp = normed_inp.to(torch.bfloat16)
+                    modulated_inp = modulate( normed_inp, shift=img_mod1_shift, scale=img_mod1_scale )
+                    del normed_inp, img_mod1_shift, img_mod1_scale
+                    if step_no <= self.cache_start_step or step_no == self.num_steps-1:
                         self.accumulated_rel_l1_distance = 0
-                self.previous_modulated_input = modulated_inp  
+                    else: 
+                        coefficients = [7.33226126e+02, -4.01131952e+02,  6.75869174e+01, -3.14987800e+00, 9.61237896e-02]
+                        rescale_func = np.poly1d(coefficients)
+                        self.accumulated_rel_l1_distance += rescale_func(((modulated_inp-self.previous_modulated_input).abs().mean() / self.previous_modulated_input.abs().mean()).cpu().item())
+                        if self.accumulated_rel_l1_distance < self.rel_l1_thresh:
+                            self.should_calc = False
+                            self.cache_skipped_steps += 1
+                        else:
+                            self.accumulated_rel_l1_distance = 0
+                    self.previous_modulated_input = modulated_inp  
         else:
             self.should_calc = True
 

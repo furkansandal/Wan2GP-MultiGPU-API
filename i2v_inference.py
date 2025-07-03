@@ -584,10 +584,10 @@ def main():
     # If teacache => reset counters
     if trans.enable_cache:
         trans.teacache_counter = 0
-        trans.teacache_multiplier = args.teacache
+        trans.cache_multiplier = args.teacache
         trans.cache_start_step = int(args.teacache_start * args.steps / 100.0)
         trans.num_steps = args.steps
-        trans.teacache_skipped_steps = 0
+        trans.cache_skipped_steps = 0
         trans.previous_residual_uncond = None
         trans.previous_residual_cond = None
 

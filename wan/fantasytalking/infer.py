@@ -10,7 +10,7 @@ def parse_audio(audio_path, num_frames, fps = 23, device = "cuda"):
     fantasytalking = FantasyTalkingAudioConditionModel(None, 768, 2048).to(device)
     from mmgp import offload
     from accelerate import init_empty_weights
-    from fantasytalking.model import AudioProjModel
+    from .model import AudioProjModel
 
     torch.set_grad_enabled(False) 
 

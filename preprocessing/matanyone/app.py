@@ -395,19 +395,20 @@ def show_outputs():
     return gr.update(visible=True), gr.update(visible=True)
 
 def add_audio_to_video(video_path, audio_path, output_path):
-    try:
-        video_input = ffmpeg.input(video_path)
-        audio_input = ffmpeg.input(audio_path)
+    pass
+    # try:
+    #     video_input = ffmpeg.input(video_path)
+    #     audio_input = ffmpeg.input(audio_path)
 
-        _ = (
-            ffmpeg
-            .output(video_input, audio_input, output_path, vcodec="copy", acodec="aac")
-            .run(overwrite_output=True, capture_stdout=True, capture_stderr=True)
-        )
-        return output_path
-    except ffmpeg.Error as e:
-        print(f"FFmpeg error:\n{e.stderr.decode()}")
-        return None
+    #     _ = (
+    #         ffmpeg
+    #         .output(video_input, audio_input, output_path, vcodec="copy", acodec="aac")
+    #         .run(overwrite_output=True, capture_stdout=True, capture_stderr=True)
+    #     )
+    #     return output_path
+    # except ffmpeg.Error as e:
+    #     print(f"FFmpeg error:\n{e.stderr.decode()}")
+    #     return None
 
 
 def generate_video_from_frames(frames, output_path, fps=30, gray2rgb=False, audio_path=""):
@@ -542,7 +543,7 @@ def teleport_to_video_tab(tab_state):
     return gr.Tabs(selected="video_gen")
 
 
-def display(tabs, tab_state, model_choice, vace_video_input, vace_video_mask, vace_image_refs, video_prompt_video_guide_trigger):
+def display(tabs, tab_state, model_choice, vace_video_input, vace_video_mask, vace_image_refs):
     # my_tab.select(fn=load_unload_models, inputs=[], outputs=[])
 
     media_url = "https://github.com/pq-yang/MatAnyone/releases/download/media/"
@@ -879,7 +880,7 @@ def display(tabs, tab_state, model_choice, vace_video_input, vace_video_mask, va
                         alpha_output_button = gr.Button(value="Alpha Mask Output", visible=False, elem_classes="new_button")
 
                 export_image_btn.click(  fn=export_image, inputs= [vace_image_refs, foreground_image_output], outputs= [vace_image_refs]).then( #video_prompt_video_guide_trigger, 
-                    fn=teleport_to_video_tab, inputs= [], outputs= [tabs])
+                    fn=teleport_to_video_tab, inputs= [tab_state], outputs= [tabs])
 
                 # first step: get the image information 
                 extract_frames_button.click(

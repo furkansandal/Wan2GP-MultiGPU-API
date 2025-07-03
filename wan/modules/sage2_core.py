@@ -61,6 +61,23 @@ def is_sage2_supported():
             return False
     return True
 
+from importlib.metadata import version
+sg2_version = version("sageattention")
+sg2pp = sg2_version.startswith("2.2")
+
+import subprocess
+import re
+def get_cuda_version():
+    try:
+        output = subprocess.check_output(['nvcc', '--version']).decode()
+        match = re.search(r'release (\d+)\.(\d+)', output)
+        if match:
+            major, minor = int(match.group(1)), int(match.group(2))
+            return major, minor
+    except Exception as e:
+        print("Failed to get CUDA version:", e)
+    return None, None
+
 def get_cuda_arch_versions():
     cuda_archs = []
     for i in range(torch.cuda.device_count()):
@@ -136,11 +153,11 @@ def sageattn(
     elif arch == "sm86":
         return sageattn_qk_int8_pv_fp16_triton(qkv_list, tensor_layout=tensor_layout, is_causal=is_causal, sm_scale=sm_scale, return_lse=return_lse)
     elif arch == "sm89":
-        return sageattn_qk_int8_pv_fp8_cuda(qkv_list, tensor_layout=tensor_layout, is_causal=is_causal, sm_scale=sm_scale, return_lse=return_lse, pv_accum_dtype="fp32+fp32")
+        return sageattn_qk_int8_pv_fp8_cuda(qkv_list, tensor_layout=tensor_layout, is_causal=is_causal, sm_scale=sm_scale, return_lse=return_lse, pv_accum_dtype="fp32+fp16" if sg2pp else "fp32+fp32")
     elif arch == "sm90":
         return sageattn_qk_int8_pv_fp8_cuda_sm90(qkv_list, tensor_layout=tensor_layout, is_causal=is_causal, sm_scale=sm_scale, return_lse=return_lse, pv_accum_dtype="fp32+fp32")
     elif arch == "sm120":
-        return sageattn_qk_int8_pv_fp8_cuda(qkv_list, tensor_layout=tensor_layout, is_causal=is_causal, qk_quant_gran="per_warp", sm_scale=sm_scale, return_lse=return_lse, pv_accum_dtype="fp32", smooth_v= True) # sm120 has accurate fp32 accumulator for fp8 mma and triton kernel is currently not usable on sm120.
+        return sageattn_qk_int8_pv_fp8_cuda(qkv_list, tensor_layout=tensor_layout, is_causal=is_causal, qk_quant_gran="per_warp", sm_scale=sm_scale, return_lse=return_lse, pv_accum_dtype= "fp32+fp16" if sg2pp else "fp32", smooth_v= not sg2pp) # sm120 has accurate fp32 accumulator for fp8 mma and triton kernel is currently not usable on sm120.
     else:
         raise ValueError(f"Unsupported CUDA architecture: {arch}")
 
@@ -597,12 +614,15 @@ def sageattn_qk_int8_pv_fp8_cuda(
     is_causal: bool = False,
     qk_quant_gran: str = "per_thread",
     sm_scale: Optional[float] = None,
-    pv_accum_dtype: str = "fp32+fp32",
+    pv_accum_dtype: str = None,
     smooth_k: bool = True,
     smooth_v: bool = False,
     return_lse: bool = False,
     **kwargs: Any,
 ) -> torch.Tensor:
+    if pv_accum_dtype == None:
+        pv_accum_dtype = "fp32+fp16" if sg2pp else "fp32+fp32"
+        
     """
     SageAttention with INT8 quantization for Q and K, FP8 PV with FP32 accumulation, implemented using CUDA.
 
@@ -687,6 +707,12 @@ def sageattn_qk_int8_pv_fp8_cuda(
     assert q.device == k.device == v.device, "All tensors must be on the same device."
     assert q.dtype == k.dtype == v.dtype, "All tensors must have the same dtype."
 
+    # if sg2pp:
+    #     cuda_major_version, cuda_minor_version = get_cuda_version()
+    #     if(cuda_major_version, cuda_minor_version) < (12, 8) and pv_accum_dtype == 'fp32+fp16':
+    #         warnings.warn("cuda version < 12.8, change pv_accum_dtype to 'fp32+fp32'")
+    #         pv_accum_dtype = 'fp32+fp32'
+
     # FIXME(DefTruth): make sage attention work compatible with distributed 
     # env, for example, xDiT which launch by torchrun. Without this workaround, 
     # sage attention will run into illegal memory access error after first 
@@ -742,8 +768,18 @@ def sageattn_qk_int8_pv_fp8_cuda(
     if pv_accum_dtype == 'fp32+fp32' and smooth_v:
         warnings.warn("pv_accum_dtype is 'fp32+fp32', smooth_v will be ignored.")
         smooth_v = False
+    if sg2pp:
+        if pv_accum_dtype == 'fp32+fp16' and smooth_v:
+            warnings.warn("pv_accum_dtype is 'fp32+fp16', smooth_v will be ignored.")
+            smooth_v = False
 
-    v_fp8, v_scale, vm = per_channel_fp8(v, tensor_layout=tensor_layout, smooth_v=smooth_v)
+        quant_v_scale_max = 448.0
+        if pv_accum_dtype == 'fp32+fp16':
+            quant_v_scale_max = 2.25
+
+        v_fp8, v_scale, vm = per_channel_fp8(v, tensor_layout=tensor_layout, scale_max=quant_v_scale_max, smooth_v=smooth_v)
+    else:
+        v_fp8, v_scale, vm = per_channel_fp8(v, tensor_layout=tensor_layout, smooth_v=smooth_v)
     del v
     o = torch.empty(q_size, dtype=dtype, device=q_device)
     if pv_accum_dtype == "fp32":
@@ -753,6 +789,9 @@ def sageattn_qk_int8_pv_fp8_cuda(
             lse = _qattn_sm89.qk_int8_sv_f8_accum_f32_fuse_v_scale_attn(q_int8, k_int8, v_fp8, o, q_scale, k_scale, v_scale, _tensor_layout, _is_caual, _qk_quant_gran, sm_scale, _return_lse)
     elif pv_accum_dtype == "fp32+fp32":
         lse = _qattn_sm89.qk_int8_sv_f8_accum_f32_fuse_v_scale_attn_inst_buf(q_int8, k_int8, v_fp8, o, q_scale, k_scale, v_scale, _tensor_layout, _is_caual, _qk_quant_gran, sm_scale, _return_lse)
+    elif pv_accum_dtype == "fp32+fp16":
+        lse = _qattn_sm89.qk_int8_sv_f8_accum_f16_fuse_v_scale_attn_inst_buf(q_int8, k_int8, v_fp8, o, q_scale, k_scale, v_scale, _tensor_layout, _is_caual, _qk_quant_gran, sm_scale, _return_lse)
+
 
     o = o[..., :head_dim_og]
 

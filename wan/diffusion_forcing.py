@@ -19,6 +19,7 @@ from wan.utils.utils import calculate_new_dimensions
 from .utils.fm_solvers import (FlowDPMSolverMultistepScheduler,
                                get_sampling_sigmas, retrieve_timesteps)
 from .utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
+from wgp import update_loras_slists
 
 class DTT2V:
 
@@ -216,6 +217,7 @@ class DTT2V:
         slg_start = 0.0,
         slg_end = 1.0,
         callback = None,
+        loras_slists = None,
         **bbargs
     ):
         self._interrupt = False
@@ -316,8 +318,9 @@ class DTT2V:
 
         updated_num_steps=  len(step_matrix)
         if callback != None:
+            update_loras_slists(self.model, loras_slists, updated_num_steps)
             callback(-1, None, True, override_num_inference_steps = updated_num_steps)
-        if self.model.enable_cache:
+        if self.model.enable_cache == "tea":
             x_count = 2 if self.do_classifier_free_guidance else 1
             self.model.previous_residual = [None] * x_count 
             time_steps_comb = []
@@ -328,8 +331,10 @@ class DTT2V:
                 if overlap_noise > 0 and valid_interval_start < predix_video_latent_length:
                     timestep[:, valid_interval_start:predix_video_latent_length] = overlap_noise
                 time_steps_comb.append(timestep)
-            self.model.compute_teacache_threshold(self.model.cache_start_step, time_steps_comb, self.model.teacache_multiplier)
+            self.model.compute_teacache_threshold(self.model.cache_start_step, time_steps_comb, self.model.cache_multiplier)
             del time_steps_comb
+        else:
+            trans.enable_cache == None
         from mmgp import offload
         freqs = get_rotary_pos_embed(latents.shape[1 :], enable_RIFLEx= False) 
         kwrags = {

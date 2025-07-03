@@ -934,10 +934,15 @@ class HunyuanVideoAudioPipeline(DiffusionPipeline):
 
         transformer = self.transformer
 
-        if transformer.enable_cache:
-            teacache_multiplier = transformer.teacache_multiplier
+        if transformer.enable_cache == "tea":
+            teacache_multiplier = transformer.cache_multiplier
             transformer.accumulated_rel_l1_distance = 0
             transformer.rel_l1_thresh = 0.1 if teacache_multiplier < 2 else 0.15
+        elif transformer.enable_cache == "mag":
+            transformer.compute_magcache_threshold(transformer.cache_start_step, num_inference_steps, transformer.cache_multiplier)
+            transformer.accumulated_err, transformer.accumulated_steps, transformer.accumulated_ratio  = 0, 0, 1.0
+        else:
+            transformer.enable_cache == None
 
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
@@ -1136,7 +1141,7 @@ class HunyuanVideoAudioPipeline(DiffusionPipeline):
         if self._interrupt:
             return [None]
 
-        if transformer.enable_cache:
+        if transformer.enable_cache == "tea":
             cache_size = round( infer_length / frames_per_batch )
             transformer.previous_residual = [None] * latent_items
             cache_all_previous_residual =  [None] * latent_items
@@ -1144,6 +1149,8 @@ class HunyuanVideoAudioPipeline(DiffusionPipeline):
             cache_should_calc = [True] * cache_size 
             cache_accumulated_rel_l1_distance = [0.] * cache_size
             cache_teacache_skipped_steps = [0] * cache_size
+        elif transformer.enable_cache == "mag":
+            transformer.previous_residual = [None] * latent_items
 
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
@@ -1180,7 +1187,7 @@ class HunyuanVideoAudioPipeline(DiffusionPipeline):
                     img_ref_len = (latent_model_input.shape[-1] // 2)  * (latent_model_input.shape[-2] // 2) * ( 1) 
                     img_all_len = (latents_all.shape[-1] // 2)  * (latents_all.shape[-2] // 2) * latents_all.shape[-3]
 
-                    if transformer.enable_cache and cache_size > 1:
+                    if transformer.enable_cache == "tea" and cache_size > 1:
                         for l in range(latent_items):
                             if cache_all_previous_residual[l] != None:
                                 bsz = cache_all_previous_residual[l].shape[0]
@@ -1297,7 +1304,7 @@ class HunyuanVideoAudioPipeline(DiffusionPipeline):
                         pred_latents[:, :, p] += latents[:, :, iii]
                         counter[:, :, p] += 1
 
-                    if transformer.enable_cache and cache_size > 1:
+                    if transformer.enable_cache == "tea" and cache_size > 1:
                         for l in range(latent_items):
                             if transformer.previous_residual[l] != None:
                                 bsz = transformer.previous_residual[l].shape[0]

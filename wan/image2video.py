@@ -26,6 +26,7 @@ from .utils.fm_solvers import (FlowDPMSolverMultistepScheduler,
 from .utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from wan.modules.posemb_layers import get_rotary_pos_embed
 from wan.utils.utils import resize_lanczos, calculate_new_dimensions
+from wan.utils.basic_flowmatch import FlowMatchScheduler
 
 def optimized_scale(positive_flat, negative_flat):
 
@@ -150,6 +151,7 @@ class WanI2V:
         audio_proj=None,
         audio_context_lens=None,
         model_filename = None,
+        offloadobj = None,
         **bbargs
     ):
         r"""
@@ -262,7 +264,7 @@ class WanI2V:
         clip_context = self.clip.visual([image_start[:, None, :, :]])
 
         from mmgp import offload
-        offload.last_offload_obj.unload_all()
+        offloadobj.unload_all()
         if any_end_frame:
             mean2 = 0
             enc= torch.concat([
@@ -283,8 +285,12 @@ class WanI2V:
 
 
         # evaluation mode
-
-        if sample_solver == 'unipc':
+        if sample_solver == 'causvid':
+            sample_scheduler = FlowMatchScheduler(num_inference_steps=sampling_steps, shift=shift, sigma_min=0, extra_one_step=True)
+            timesteps = torch.tensor([1000, 934, 862, 756, 603, 410, 250, 140, 74])[:sampling_steps].to(self.device)
+            sample_scheduler.timesteps =timesteps
+            sample_scheduler.sigmas = torch.cat([sample_scheduler.timesteps / 1000, torch.tensor([0.], device=self.device)])
+        elif sample_solver == 'unipc' or sample_solver == "":
             sample_scheduler = FlowUniPCMultistepScheduler(
                 num_train_timesteps=self.num_train_timesteps,
                 shift=1,
@@ -303,7 +309,7 @@ class WanI2V:
                 device=self.device,
                 sigmas=sampling_sigmas)
         else:
-            raise NotImplementedError("Unsupported solver.")
+            raise NotImplementedError("Unsupported scheduler.")
 
         # sample videos
         latent = noise
@@ -317,10 +323,16 @@ class WanI2V:
             "audio_proj": audio_proj.to(self.dtype),
             "audio_context_lens": audio_context_lens,
             }) 
-
-        if self.model.enable_cache:
-            self.model.previous_residual = [None] * (3 if audio_cfg_scale !=None else 2)
-            self.model.compute_teacache_threshold(self.model.cache_start_step, timesteps, self.model.teacache_multiplier)
+        cache_type = self.model.enable_cache
+        if  cache_type != None:
+            x_count = 3 if audio_cfg_scale !=None else 2
+            self.model.previous_residual = [None] * x_count
+            if cache_type == "tea":
+                self.model.compute_teacache_threshold(self.model.cache_start_step, timesteps, self.model.cache_multiplier)
+            else: 
+                self.model.compute_magcache_threshold(self.model.cache_start_step, timesteps, self.model.cache_multiplier)
+                self.model.accumulated_err, self.model.accumulated_steps, self.model.accumulated_ratio  = [0.0] * x_count, [0] * x_count, [1.0] * x_count
+                self.model.one_for_all = x_count > 2
 
         # self.model.to(self.device)
         if callback != None:

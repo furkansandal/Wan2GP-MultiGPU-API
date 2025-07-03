@@ -28,6 +28,7 @@ from wan.modules.posemb_layers import get_rotary_pos_embed
 from .utils.vace_preprocessor import VaceVideoProcessor
 from wan.utils.basic_flowmatch import FlowMatchScheduler
 from wan.utils.utils import get_outpainting_frame_location
+from wgp import update_loras_slists
 
 def optimized_scale(positive_flat, negative_flat):
 
@@ -231,16 +232,16 @@ class WanT2V:
                 canvas = canvas.to(device)
         return ref_img.to(device), canvas
 
-    def prepare_source(self, src_video, src_mask, src_ref_images, total_frames, image_size,  device, keep_frames= [], start_frame = 0,  fit_into_canvas = None, pre_src_video = None, inject_frames = [], outpainting_dims = None, any_background_ref = False):
+    def prepare_source(self, src_video, src_mask, src_ref_images, total_frames, image_size,  device, keep_video_guide_frames= [], start_frame = 0,  fit_into_canvas = None, pre_src_video = None, inject_frames = [], outpainting_dims = None, any_background_ref = False):
         image_sizes = []
-        trim_video = len(keep_frames)
+        trim_video_guide = len(keep_video_guide_frames)
         def conv_tensor(t, device):
             return t.float().div_(127.5).add_(-1).permute(3, 0, 1, 2).to(device)
 
         for i, (sub_src_video, sub_src_mask, sub_pre_src_video) in enumerate(zip(src_video, src_mask,pre_src_video)):
             prepend_count = 0 if sub_pre_src_video == None else sub_pre_src_video.shape[1]
             num_frames = total_frames - prepend_count            
-            num_frames = min(num_frames, trim_video) if trim_video > 0 else num_frames
+            num_frames = min(num_frames, trim_video_guide) if trim_video_guide > 0 and sub_src_video != None else num_frames
             if sub_src_mask is not None and sub_src_video is not None:
                 src_video[i] = conv_tensor(sub_src_video[:num_frames], device)
                 src_mask[i] = conv_tensor(sub_src_mask[:num_frames], device)
@@ -253,14 +254,14 @@ class WanT2V:
                 if src_video_shape[1] != total_frames:
                     src_video[i] =  torch.cat( [src_video[i], src_video[i].new_zeros(src_video_shape[0], total_frames -src_video_shape[1], *src_video_shape[-2:])], dim=1)
                     src_mask[i] =  torch.cat( [src_mask[i], src_mask[i].new_ones(src_video_shape[0], total_frames -src_video_shape[1], *src_video_shape[-2:])], dim=1)
-                src_mask[i] = torch.clamp((src_mask[i][:1, :, :, :] + 1) / 2, min=0, max=1)
+                src_mask[i] = torch.clamp((src_mask[i][:, :, :, :] + 1) / 2, min=0, max=1)
                 image_sizes.append(src_video[i].shape[2:])
             elif sub_src_video is None:
                 if prepend_count > 0:
                     src_video[i] =  torch.cat( [sub_pre_src_video, torch.zeros((3, num_frames, image_size[0], image_size[1]), device=device)], dim=1)
                     src_mask[i] =  torch.cat( [torch.zeros_like(sub_pre_src_video), torch.ones((3, num_frames, image_size[0], image_size[1]), device=device)] ,1)
                 else:
-                    src_video[i] = torch.zeros((3, num_frames, image_size[0], image_size[1]), device=device)
+                    src_video[i] = torch.zeros((3, total_frames, image_size[0], image_size[1]), device=device)
                     src_mask[i] = torch.ones_like(src_video[i], device=device)
                 image_sizes.append(image_size)
             else:
@@ -274,7 +275,7 @@ class WanT2V:
                     src_video[i] =  torch.cat( [src_video[i], src_video[i].new_zeros(src_video_shape[0], total_frames -src_video_shape[1], *src_video_shape[-2:])], dim=1)
                     src_mask[i] =  torch.cat( [src_mask[i], src_mask[i].new_ones(src_video_shape[0], total_frames -src_video_shape[1], *src_video_shape[-2:])], dim=1)
                 image_sizes.append(src_video[i].shape[2:])
-            for k, keep in enumerate(keep_frames):
+            for k, keep in enumerate(keep_video_guide_frames):
                 if not keep:
                     src_video[i][:, k:k+1] = 0
                     src_mask[i][:, k:k+1] = 1
@@ -328,6 +329,7 @@ class WanT2V:
                 input_masks = None,
                 input_ref_images = None,      
                 input_video=None,
+                denoising_strength = 1.0,
                 target_camera=None,                  
                 context_scale=None,
                 width = 1280,
@@ -354,7 +356,10 @@ class WanT2V:
                 return_latent_slice = None,
                 overlap_noise = 0,
                 conditioning_latents_size = 0,
+                keep_frames_parsed = [],
                 model_filename = None,
+                model_type = None,
+                loras_slists = None,
                 **bbargs
                 ):
         r"""
@@ -420,6 +425,10 @@ class WanT2V:
             cam_emb = get_camera_embedding(target_camera)       
             cam_emb = cam_emb.to(dtype=self.dtype, device=self.device)
 
+        if denoising_strength < 1. and input_frames != None:
+            height, width = input_frames.shape[-2:]
+            source_latents = self.vae.encode([input_frames])[0]
+
         if vace :
             # vace context encode
             input_frames = [u.to(self.device) for u in input_frames]
@@ -464,11 +473,12 @@ class WanT2V:
 
         # evaluation mode
 
-        if False:
+        if sample_solver == 'causvid':
             sample_scheduler = FlowMatchScheduler(num_inference_steps=sampling_steps, shift=shift, sigma_min=0, extra_one_step=True)
-            timesteps = torch.tensor([1000, 934, 862, 756, 603, 410, 250, 140, 74, 0])[:sampling_steps].to(self.device)
+            timesteps = torch.tensor([1000, 934, 862, 756, 603, 410, 250, 140, 74])[:sampling_steps].to(self.device)
             sample_scheduler.timesteps =timesteps
-        elif sample_solver == 'unipc':
+            sample_scheduler.sigmas = torch.cat([sample_scheduler.timesteps / 1000, torch.tensor([0.], device=self.device)])
+        elif sample_solver == 'unipc' or sample_solver == "":
             sample_scheduler = FlowUniPCMultistepScheduler( num_train_timesteps=self.num_train_timesteps, shift=1, use_dynamic_shifting=False)
             sample_scheduler.set_timesteps( sampling_steps, device=self.device, shift=shift)
             
@@ -484,11 +494,32 @@ class WanT2V:
                 device=self.device,
                 sigmas=sampling_sigmas)
         else:
-            raise NotImplementedError("Unsupported solver.")
+            raise NotImplementedError(f"Unsupported Scheduler {sample_solver}")
+
 
         # sample videos
         latents = noise[0]
         del noise
+
+        injection_denoising_step = 0
+        inject_from_start = False
+        if denoising_strength < 1 and input_frames != None:
+            if len(keep_frames_parsed) == 0  or all(keep_frames_parsed): keep_frames_parsed = [] 
+            injection_denoising_step = int(sampling_steps * (1. - denoising_strength) )
+            latent_keep_frames = []
+            if source_latents.shape[1] < latents.shape[1] or len(keep_frames_parsed) > 0:
+                inject_from_start = True
+                if len(keep_frames_parsed) >0 :
+                    latent_keep_frames =[keep_frames_parsed[0]]
+                    for i in range(1, len(keep_frames_parsed), 4):
+                        latent_keep_frames.append(all(keep_frames_parsed[i:i+4]))
+            else:
+                timesteps = timesteps[injection_denoising_step:]
+                if hasattr(sample_scheduler, "timesteps"): sample_scheduler.timesteps = timesteps
+                if hasattr(sample_scheduler, "sigmas"): sample_scheduler.sigmas= sample_scheduler.sigmas[injection_denoising_step:]
+                injection_denoising_step = 0
+
+
         batch_size = 1
         if target_camera != None:
             shape = list(latents.shape[1:])
@@ -511,11 +542,16 @@ class WanT2V:
                 # overlapped_latents_size = 3
                 z_reactive = [  zz[0:16, 0:overlapped_latents_size + ref_images_count].clone() for zz in z]
 
-
-        if self.model.enable_cache:
+        cache_type = self.model.enable_cache 
+        if cache_type != None:
             x_count = 3 if phantom else 2
-            self.model.previous_residual = [None] * x_count 
-            self.model.compute_teacache_threshold(self.model.cache_start_step, timesteps, self.model.teacache_multiplier)
+            self.model.previous_residual = [None] * x_count
+            if cache_type == "tea":
+                self.model.compute_teacache_threshold(self.model.cache_start_step, timesteps, self.model.cache_multiplier)
+            else: 
+                self.model.compute_magcache_threshold(self.model.cache_start_step, timesteps, self.model.cache_multiplier)
+                self.model.accumulated_err, self.model.accumulated_steps, self.model.accumulated_ratio  = [0.0] * x_count, [0] * x_count, [1.0] * x_count
+                self.model.one_for_all = x_count > 2
         if callback != None:
             callback(-1, None, True)
 
@@ -524,8 +560,31 @@ class WanT2V:
         if chipmunk:
             self.model.setup_chipmunk()
 
+        updated_num_steps=  len(timesteps)
+        if callback != None:
+            update_loras_slists(self.model, loras_slists, updated_num_steps)
+            callback(-1, None, True, override_num_inference_steps = updated_num_steps)
+
+        scheduler_kwargs = {} if isinstance(sample_scheduler, FlowMatchScheduler) else {"generator": seed_g}
+
         for i, t in enumerate(tqdm(timesteps)):
             timestep = [t]
+
+            if denoising_strength < 1 and input_frames != None and i <= injection_denoising_step:
+                sigma = t / 1000
+                noise = torch.randn( *target_shape, dtype=torch.float32, device=self.device, generator=seed_g)
+                if inject_from_start:
+                    new_latents = latents.clone()
+                    new_latents[:, :source_latents.shape[1] ] = noise[:, :source_latents.shape[1] ] * sigma + (1 - sigma) * source_latents
+                    for latent_no, keep_latent in enumerate(latent_keep_frames):
+                        if not keep_latent:
+                            new_latents[:, latent_no:latent_no+1 ] = latents[:, latent_no:latent_no+1]
+                    latents = new_latents
+                    new_latents = None
+                else:
+                    latents = noise * sigma + (1 - sigma) * source_latents
+                noise = None
+
             if overlapped_latents != None :
                 overlap_noise_factor = overlap_noise / 1000 
                 latent_noise_factor = t / 1000
@@ -610,7 +669,6 @@ class WanT2V:
                         noise_pred_uncond *= alpha
                 noise_pred = noise_pred_uncond + guide_scale * (noise_pred_text - noise_pred_uncond)            
             noise_pred_uncond, noise_pred_cond, noise_pred_text, pos_it, pos_i, neg  = None, None, None, None, None, None
-            scheduler_kwargs = {} if isinstance(sample_scheduler, FlowMatchScheduler) else {"generator": seed_g}
             temp_x0 = sample_scheduler.step(
                 noise_pred[:, :target_shape[1]].unsqueeze(0),
                 t,

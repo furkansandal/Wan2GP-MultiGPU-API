@@ -57,6 +57,42 @@ def resample(video_fps, video_frames_count, max_target_frames_count, target_fps,
     frame_ids = frame_ids[:max_target_frames_count]
     return frame_ids
 
+import os
+from datetime import datetime
+
+def get_file_creation_date(file_path):
+    # On Windows
+    if os.name == 'nt':
+        return datetime.fromtimestamp(os.path.getctime(file_path))
+    # On Unix/Linux/Mac (gets last status change, not creation)
+    else:
+        stat = os.stat(file_path)
+    return datetime.fromtimestamp(stat.st_birthtime if hasattr(stat, 'st_birthtime') else stat.st_mtime)
+
+def truncate_for_filesystem(s, max_bytes=255):
+    if len(s.encode('utf-8')) <= max_bytes: return s
+    l, r = 0, len(s)
+    while l < r:
+        m = (l + r + 1) // 2
+        if len(s[:m].encode('utf-8')) <= max_bytes: l = m
+        else: r = m - 1
+    return s[:l]
+
+def get_video_info(video_path):
+    import cv2
+    cap = cv2.VideoCapture(video_path)
+    
+    # Get FPS
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    
+    # Get resolution
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) 
+    cap.release()
+    
+    return fps, width, height, frame_count
+
 def get_video_frame(file_name, frame_no):
     decord.bridge.set_bridge('torch')
     reader = decord.VideoReader(file_name)

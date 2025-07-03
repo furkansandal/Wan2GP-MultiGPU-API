@@ -646,6 +646,7 @@ class WanModel(ModelMixin, ConfigMixin):
 
             for k,v in sd.items():
                 k = k.replace("lora_unet_blocks_","diffusion_model.blocks.")
+                k = k.replace("lora_unet__blocks_","diffusion_model.blocks.")
 
                 for s,t in zip(src_list, tgt_list):
                     k = k.replace(s,t)
@@ -653,33 +654,15 @@ class WanModel(ModelMixin, ConfigMixin):
                 k = k.replace("lora_up","lora_B")
                 k = k.replace("lora_down","lora_A")
 
-                if "alpha" in k:
-                    alphas[k] = v
-                else:
-                    new_sd[k] = v
+                new_sd[k] = v
 
-            new_alphas = {}
-            for k,v in new_sd.items():
-                if "lora_B" in k:
-                    dim = v.shape[1]
-                elif "lora_A" in k:
-                    dim = v.shape[0]
-                else:
-                    continue
-                alpha_key = k[:-len("lora_X.weight")] +"alpha"
-                if alpha_key in alphas:
-                    scale = alphas[alpha_key] / dim
-                    new_alphas[alpha_key] = scale
-                else:
-                    print(f"Lora alpha'{alpha_key}' is missing")
-            new_sd.update(new_alphas)
             sd = new_sd
         from wgp import test_class_i2v 
         if not test_class_i2v(model_type):
             new_sd = {}
             # convert loras for i2v to t2v
             for k,v in sd.items():
-                if  any(layer in k for layer in ["cross_attn.k_img", "cross_attn.v_img"]):
+                if  any(layer in k for layer in ["cross_attn.k_img", "cross_attn.v_img", "img_emb."]):
                     continue
                 new_sd[k] = v
             sd = new_sd
@@ -849,7 +832,7 @@ class WanModel(ModelMixin, ConfigMixin):
                 block.projector.bias = nn.Parameter(torch.zeros(dim))            
 
         if fantasytalking_dim > 0:
-            from fantasytalking.model import WanCrossAttentionProcessor
+            from wan.fantasytalking.model import WanCrossAttentionProcessor
             for block in self.blocks:
                 block.cross_attn.processor = WanCrossAttentionProcessor(fantasytalking_dim, dim)
 
@@ -891,6 +874,66 @@ class WanModel(ModelMixin, ConfigMixin):
 
         self._lock_dtype = dtype
 
+    def compute_magcache_threshold(self, start_step, timesteps = None, speed_factor =0):
+        def nearest_interp(src_array, target_length):
+            src_length = len(src_array)
+            if target_length == 1: return np.array([src_array[-1]])
+            scale = (src_length - 1) / (target_length - 1)
+            mapped_indices = np.round(np.arange(target_length) * scale).astype(int)
+            return src_array[mapped_indices]
+        num_inference_steps = len(timesteps)
+        if len(self.def_mag_ratios) != num_inference_steps*2:
+            mag_ratio_con = nearest_interp(self.def_mag_ratios[0::2], num_inference_steps)
+            mag_ratio_ucon = nearest_interp(self.def_mag_ratios[1::2], num_inference_steps)
+            interpolated_mag_ratios = np.concatenate([mag_ratio_con.reshape(-1, 1), mag_ratio_ucon.reshape(-1, 1)], axis=1).reshape(-1)
+            self.mag_ratios = interpolated_mag_ratios
+        else:
+            self.mag_ratios = self.def_mag_ratios
+
+
+        best_deltas = None
+        best_threshold = 0.01
+        best_diff = 1000
+        best_signed_diff = 1000
+        target_nb_steps= int(len(timesteps) / speed_factor)
+        threshold = 0.01
+        x_id_max = 1
+        while threshold <= 0.6:
+            nb_steps = 0
+            diff = 1000
+            accumulated_err, accumulated_steps, accumulated_ratio = [0] * x_id_max , [0] * x_id_max, [1.0] * x_id_max
+            for i, t in enumerate(timesteps):
+                if i<=start_step:
+                    skip  = False
+                    x_should_calc = [True] * x_id_max
+                else:
+                    x_should_calc = []
+                    for cur_x_id in range(x_id_max):
+                        cur_mag_ratio = self.mag_ratios[i * 2 + cur_x_id] # conditional and unconditional in one list
+                        accumulated_ratio[cur_x_id] *= cur_mag_ratio # magnitude ratio between current step and the cached step
+                        accumulated_steps[cur_x_id] += 1 # skip steps plus 1
+                        cur_skip_err = np.abs(1-accumulated_ratio[cur_x_id]) # skip error of current steps
+                        accumulated_err[cur_x_id] += cur_skip_err # accumulated error of multiple steps
+                        if accumulated_err[cur_x_id]<threshold and accumulated_steps[cur_x_id]<=self.magcache_K:
+                            skip  = True
+                        else:
+                            skip  = False
+                            accumulated_err[cur_x_id], accumulated_steps[cur_x_id], accumulated_ratio[cur_x_id] = 0, 0, 1.0
+                        x_should_calc.append(not skip)
+                if not skip:
+                    nb_steps += 1
+                    signed_diff = target_nb_steps - nb_steps               
+                    diff = abs(signed_diff)  
+            if diff < best_diff:
+                best_threshold = threshold
+                best_diff = diff
+                best_signed_diff = signed_diff
+            elif diff > best_diff:
+                break
+            threshold += 0.01
+        self.magcache_thresh = best_threshold
+        print(f"Mag Cache, best threshold found:{best_threshold:0.2f} with gain x{len(timesteps)/(target_nb_steps - best_signed_diff):0.2f} for a target of x{speed_factor}")
+        return best_threshold
 
     def compute_teacache_threshold(self, start_step, timesteps = None, speed_factor =0): 
         modulation_dtype = self.time_projection[1].weight.dtype
@@ -1073,48 +1116,84 @@ class WanModel(ModelMixin, ConfigMixin):
             kwargs['context_scale'] = vace_context_scale
             hints_list = [ [ [sub_c] for sub_c in c] for _ in range(len(x_list)) ] 
             del c
-
         should_calc = True
-        if self.enable_cache: 
-            if x_id != 0:
-                should_calc = self.should_calc
-            else:
-                if current_step <= self.cache_start_step or current_step == self.num_steps-1:
+        x_should_calc = None
+        if self.enable_cache != None: 
+            if self.enable_cache == "mag":
+                if current_step <= self.cache_start_step:
                     should_calc = True
-                    self.accumulated_rel_l1_distance = 0
+                elif self.one_for_all and x_id != 0: # not joint pass, not main pas, one for all
+                    assert len(x_list) == 1
+                    should_calc = self.should_calc
                 else:
-                    rescale_func = np.poly1d(self.coefficients)
-                    delta = abs(rescale_func(((e-self.previous_modulated_input).abs().mean() / self.previous_modulated_input.abs().mean()).cpu().item()))
-                    self.accumulated_rel_l1_distance += delta
-                    if self.accumulated_rel_l1_distance < self.rel_l1_thresh:
-                        should_calc = False
-                        self.teacache_skipped_steps += 1
-                        # print(f"Teacache Skipped Step no {current_step} ({self.teacache_skipped_steps}/{current_step}), delta={delta}" )
-                    else:
+                    x_should_calc = []
+                    for i in range(1 if self.one_for_all else len(x_list)):
+                        cur_x_id = i if joint_pass else x_id  
+                        cur_mag_ratio = self.mag_ratios[current_step * 2 + cur_x_id] # conditional and unconditional in one list
+                        self.accumulated_ratio[cur_x_id] *= cur_mag_ratio # magnitude ratio between current step and the cached step
+                        self.accumulated_steps[cur_x_id] += 1 # skip steps plus 1
+                        cur_skip_err = np.abs(1-self.accumulated_ratio[cur_x_id]) # skip error of current steps
+                        self.accumulated_err[cur_x_id] += cur_skip_err # accumulated error of multiple steps
+                        if self.accumulated_err[cur_x_id]<self.magcache_thresh and self.accumulated_steps[cur_x_id]<=self.magcache_K:
+                            skip_forward = True
+                            if i == 0 and x_id == 0: self.cache_skipped_steps += 1
+                            print(f"skip: step={current_step} for x_id={cur_x_id}, accum error {self.accumulated_err[cur_x_id]}")
+                        else:
+                            skip_forward = False
+                            self.accumulated_err[cur_x_id], self.accumulated_steps[cur_x_id], self.accumulated_ratio[cur_x_id] = 0, 0, 1.0
+                        x_should_calc.append(not skip_forward)
+                    if self.one_for_all:
+                        should_calc = self.should_calc = x_should_calc[0] 
+                        x_should_calc = None
+            else:
+                if x_id != 0:
+                    should_calc = self.should_calc
+                else:
+                    if current_step <= self.cache_start_step or current_step == self.num_steps-1:
                         should_calc = True
                         self.accumulated_rel_l1_distance = 0
-                self.previous_modulated_input = e 
-                self.should_calc = should_calc                        
+                    else:
+                        rescale_func = np.poly1d(self.coefficients)
+                        delta = abs(rescale_func(((e-self.previous_modulated_input).abs().mean() / self.previous_modulated_input.abs().mean()).cpu().item()))
+                        self.accumulated_rel_l1_distance += delta
+                        if self.accumulated_rel_l1_distance < self.rel_l1_thresh:
+                            should_calc = False
+                            self.cache_skipped_steps += 1
+                            # print(f"Teacache Skipped Step no {current_step} ({self.cache_skipped_steps}/{current_step}), delta={delta}" )
+                        else:
+                            should_calc = True
+                            self.accumulated_rel_l1_distance = 0
+                    self.previous_modulated_input = e 
+                    self.should_calc = should_calc
 
-        if not should_calc:
+        if x_should_calc  == None: x_should_calc = [should_calc] * len(x_list) 
+
+        if joint_pass:
+            for i, x in enumerate(x_list):
+                if not x_should_calc[i]: x += self.previous_residual[i]
+        elif not x_should_calc[0]:
+            x = x_list[0]
+            x += self.previous_residual[x_id]
+        x = None
+
+        if self.enable_cache != None:
+            if self.previous_residual == None: self.previous_residual = [ None ] * len(self.previous_residual)
+
             if joint_pass:
-                for i, x in enumerate(x_list):
-                    x += self.previous_residual[i]
-            else:
-                x = x_list[0]
-                x += self.previous_residual[x_id]
-            x = None
-        else:
-            if self.enable_cache:
-                if joint_pass:
-                    self.previous_residual = [ None ] * len(self.previous_residual)
-                else:
-                    self.previous_residual[x_id] = None
-                ori_hidden_states = [ None ] * len(x_list)
+                for i, should_calc in enumerate(x_should_calc):
+                    if should_calc: self.previous_residual[i] = None
+            elif x_should_calc[0]:
+                self.previous_residual[x_id] = None
+            ori_hidden_states = [ None ] * len(x_list)
+            if all(x_should_calc):
                 ori_hidden_states[0] = x_list[0].clone()
                 for i in range(1, len(x_list)):
-                    ori_hidden_states[i] = ori_hidden_states[0] if is_source_x[i] else x_list[i].clone()  
-            
+                    ori_hidden_states[i] = ori_hidden_states[0] if is_source_x[i] else x_list[i].clone()
+            else:
+                for i in range(len(x_list)):
+                    if x_should_calc[i]: ori_hidden_states[i] = x_list[i].clone()
+
+        if any(x_should_calc):
             for block_idx, block in enumerate(self.blocks):
                 offload.shared_state["layer"] = block_idx
                 if callback != None:
@@ -1122,18 +1201,23 @@ class WanModel(ModelMixin, ConfigMixin):
                 if pipeline._interrupt:
                     return [None] * len(x_list)
 
-                if (x_id != 0 or joint_pass) and slg_layers is not None and block_idx in slg_layers:
-                    if not joint_pass:
-                        continue
-                    x_list[0] = block(x_list[0], context = context_list[0], e= e0, **kwargs)
-                else:
-                    for i, (x, context, hints, audio_scale) in enumerate(zip(x_list, context_list, hints_list, audio_scale_list)):
-                        x_list[i] = block(x, context = context, hints= hints, audio_scale= audio_scale, e= e0, **kwargs)
-                        del x
-                    del context, hints
+                # if (x_id != 0 or joint_pass) and slg_layers is not None and block_idx in slg_layers:
+                #     if not joint_pass or not x_should_calc[0]:
 
-            if self.enable_cache:
-                if joint_pass:
+                if slg_layers is not None and block_idx in slg_layers:
+                    if x_id != 0 or not x_should_calc[0]:
+                        continue
+                    x_list[0] = block(x_list[0], context = context_list[0], audio_scale= audio_scale_list[0], e= e0, **kwargs)
+                else:
+                    for i, (x, context, hints, audio_scale, should_calc) in enumerate(zip(x_list, context_list, hints_list, audio_scale_list, x_should_calc)):
+                        if should_calc:
+                            x_list[i] = block(x, context = context, hints= hints, audio_scale= audio_scale, e= e0, **kwargs)
+                            del x
+                    context, hints = None, None
+
+        if self.enable_cache != None:
+            if joint_pass:
+                if all(x_should_calc):                        
                     for i, (x, ori, is_source) in enumerate(zip(x_list, ori_hidden_states, is_source_x)) :
                         if i == 0 or is_source and i != last_x_idx  :
                             self.previous_residual[i] = torch.sub(x, ori) 
@@ -1141,12 +1225,18 @@ class WanModel(ModelMixin, ConfigMixin):
                             self.previous_residual[i] = ori
                             torch.sub(x, ori, out=self.previous_residual[i]) 
                         ori_hidden_states[i] = None
-                        x , ori = None, None
                 else:
-                    residual = ori_hidden_states[0] # just to have a readable code
-                    torch.sub(x_list[0], ori_hidden_states[0], out=residual)
-                    self.previous_residual[x_id] = residual
-                residual, ori_hidden_states = None, None
+                    for i, (x, ori, is_source, should_calc) in enumerate(zip(x_list, ori_hidden_states, is_source_x, x_should_calc)) :
+                        if should_calc:
+                            self.previous_residual[i] = ori
+                            torch.sub(x, ori, out=self.previous_residual[i]) 
+                        ori_hidden_states[i] = None
+                x , ori = None, None
+            elif x_should_calc[0]:
+                residual = ori_hidden_states[0] # just to have a readable code
+                torch.sub(x_list[0], ori_hidden_states[0], out=residual)
+                self.previous_residual[x_id] = residual
+            residual, ori_hidden_states = None, None
 
         for i, x in enumerate(x_list):
             if chipmunk:

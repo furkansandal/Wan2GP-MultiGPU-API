@@ -17,7 +17,7 @@ gradio==5.23.0
 numpy>=1.23.5,<2
 einops
 moviepy==1.0.3
-mmgp==3.4.9
+mmgp==3.5.1
 peft==0.15.0
 mutagen
 pydantic==2.10.6
@@ -37,3 +37,8 @@ opencv-python
 pygame>=2.1.0
 sounddevice>=0.4.0
 # rembg==2.0.65
+torchdiffeq >= 0.2.5
+#   'nitrous-ema',
+#   'hydra_colorlog',
+tensordict >= 0.6.1
+open_clip_torch >= 2.29.0
