@@ -28,7 +28,6 @@ from wan.modules.posemb_layers import get_rotary_pos_embed
 from .utils.vace_preprocessor import VaceVideoProcessor
 from wan.utils.basic_flowmatch import FlowMatchScheduler
 from wan.utils.utils import get_outpainting_frame_location
-from wgp import update_loras_slists
 
 def optimized_scale(positive_flat, negative_flat):
 
@@ -395,6 +394,10 @@ class WanT2V:
                 - H: Frame height (from size)
                 - W: Frame width from size)
         """
+        # Local import to break the circular dependency with wgp
+        from wgp import update_loras_slists
+
+        self._interrupt = False
         # preprocess
         vace = "Vace" in model_filename
 

@@ -19,7 +19,6 @@ from wan.utils.utils import calculate_new_dimensions
 from .utils.fm_solvers import (FlowDPMSolverMultistepScheduler,
                                get_sampling_sigmas, retrieve_timesteps)
 from .utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
-from wgp import update_loras_slists
 
 class DTT2V:
 
@@ -220,6 +219,8 @@ class DTT2V:
         loras_slists = None,
         **bbargs
     ):
+        # Local import to avoid circular dependency
+        from wgp import update_loras_slists
         self._interrupt = False
         generator = torch.Generator(device=self.device)
         generator.manual_seed(seed)
