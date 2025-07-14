@@ -27,6 +27,7 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
+from contextlib import asynccontextmanager
 
 # Import project modules
 from mmgp import offload, profile_type
@@ -71,11 +72,48 @@ generation_tasks = {}
 task_queue = asyncio.Queue()
 worker_task = None
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifecycle"""
+    global worker_task
+    
+    # Startup
+    logger.info("Starting WGP API server...")
+    load_model()
+    
+    # Start background worker
+    worker_task = asyncio.create_task(video_generation_worker())
+    logger.info("Video generation worker started")
+    
+    logger.info("API server ready!")
+    
+    yield
+    
+    # Shutdown
+    logger.info("Shutting down API server...")
+    
+    # Cancel worker task
+    if worker_task:
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
+    
+    # Cleanup model
+    if model:
+        del model
+        torch.cuda.empty_cache()
+        gc.collect()
+
+
 # FastAPI app
 app = FastAPI(
     title="WGP LTX Video API",
     description="API for LTX Video 0.9.7 Distilled 13B inference",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # Add CORS middleware
@@ -285,7 +323,7 @@ def load_model():
         model_filepath = None
         for file in model_files:
             if os.path.exists(file):
-                model_filepath = [file]
+                model_filepath = file  # Not a list, just the filepath
                 logger.info(f"Found model file: {file}")
                 break
         
@@ -307,8 +345,9 @@ def load_model():
         
         # Initialize model with BF16 precision
         logger.info("Initializing LTXV model...")
+        # LTXV expects model_filepath as a list
         model = LTXV(
-            model_filepath=model_filepath,
+            model_filepath=[model_filepath],  # Convert to list
             text_encoder_filepath=text_encoder_filepath,
             dtype=torch.bfloat16,
             VAE_dtype=torch.bfloat16,
@@ -459,41 +498,6 @@ async def video_generation_worker():
             await asyncio.sleep(1)
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Load model on startup"""
-    global worker_task
-    
-    logger.info("Starting WGP API server...")
-    load_model()
-    
-    # Start background worker
-    worker_task = asyncio.create_task(video_generation_worker())
-    logger.info("Video generation worker started")
-    
-    logger.info("API server ready!")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown"""
-    global worker_task
-    
-    logger.info("Shutting down API server...")
-    
-    # Cancel worker task
-    if worker_task:
-        worker_task.cancel()
-        try:
-            await worker_task
-        except asyncio.CancelledError:
-            pass
-    
-    # Cleanup model
-    if model:
-        del model
-        torch.cuda.empty_cache()
-        gc.collect()
 
 
 @app.get("/")
