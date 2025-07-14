@@ -309,9 +309,7 @@ def load_model():
     try:
         # Model paths
         model_files = [
-            "ckpts/ltxv_0.9.7_13B_distilled_bf16.safetensors",
-            "ckpts/ltxv_0.9.7_13B_distilled_quanto_bf16_int8.safetensors",
-            "ckpts/ltxv_0.9.7_13B_distilled_lora128_bf16.safetensors"
+            "ckpts/ltxv_0.9.7_13B_dev_quanto_bf16_int8.safetensors"  # Add dev model
         ]
         
         text_encoder_files = [
