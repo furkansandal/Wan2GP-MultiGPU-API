@@ -30,7 +30,7 @@ import uvicorn
 from contextlib import asynccontextmanager
 
 # Import project modules
-from mmgp import offload, profile_type
+from mmgp import offload
 from ltx_video.ltxv import LTXV
 from wan.modules.attention import get_supported_attention_modes
 from transformers import AutoModelForCausalLM, AutoProcessor, AutoTokenizer
@@ -62,6 +62,7 @@ DEFAULT_NEGATIVE_PROMPT = "low quality, worst quality, deformed, distorted, disf
 model = None
 device = None
 model_lock = asyncio.Lock()
+offloadobj = None
 prompt_enhancer_image_caption_model = None
 prompt_enhancer_image_caption_processor = None
 prompt_enhancer_llm_model = None
@@ -280,7 +281,7 @@ Enhanced Prompt:"""
 
 def load_model():
     """Load LTX Video model with specified configurations"""
-    global model, device, prompt_enhancer_image_caption_model, prompt_enhancer_image_caption_processor
+    global model, device, offloadobj, prompt_enhancer_image_caption_model, prompt_enhancer_image_caption_processor
     global prompt_enhancer_llm_model, prompt_enhancer_llm_tokenizer
     
     logger.info("Starting model loading...")
@@ -388,9 +389,47 @@ def load_model():
             offload.set_max_vram_budget(40000)  # 40GB as specified
             logger.info("Set VRAM budget to 40GB")
         
-        # Set up offload profile for HighRAM_HighVRAM
-        offload.set_profile_type(profile_type.HighRAM_HighVRAM)
-        logger.info("Set offload profile to HighRAM_HighVRAM")
+        # Set up offload profile for HighRAM_HighVRAM (profile 1)
+        # Based on wgp.py pattern, profile is set using offload.profile() function
+        # Profile 1 = HighRAM_HighVRAM: at least 48 GB of RAM and 24 GB of VRAM
+        profile = 1
+        
+        # Create pipe dictionary based on wgp.py pattern for LTXV
+        pipeline = model.pipeline
+        pipe = {
+            "transformer": pipeline.video_pipeline.transformer,
+            "vae": pipeline.vae,
+            "text_encoder": pipeline.video_pipeline.text_encoder,
+            "latent_upsampler": pipeline.latent_upsampler
+        }
+        
+        # Profile configuration based on wgp.py
+        kwargs = {}
+        if profile in (2, 4, 5):
+            preload = 40000  # 40GB preload
+            kwargs["budgets"] = {"transformer": 100 if preload == 0 else preload, 
+                               "text_encoder": 100 if preload == 0 else preload, 
+                               "*": max(1000 if profile == 5 else 3000, preload)}
+        elif profile == 3:
+            kwargs["budgets"] = {"*": "70%"}
+        
+        # Apply offload profile
+        try:
+            offloadobj = offload.profile(
+                pipe, 
+                profile_no=profile, 
+                compile="", 
+                quantizeTransformer=False, 
+                loras="transformer", 
+                coTenantsMap={}, 
+                perc_reserved_mem_max=0.3,  # Default from wgp.py
+                convertWeightsFloatTo=torch.bfloat16,
+                **kwargs
+            )
+            logger.info(f"Set offload profile to HighRAM_HighVRAM (profile {profile})")
+        except Exception as e:
+            logger.warning(f"Failed to set offload profile: {e}. Continuing without profile optimization.")
+            offloadobj = None
         
         logger.info("Model loaded successfully!")
         
