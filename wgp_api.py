@@ -272,12 +272,13 @@ def load_model():
         # Model paths
         model_files = [
             "ckpts/ltxv_0.9.7_13B_distilled_bf16.safetensors",
-            "ckpts/ltxv_0.9.7_13B_distilled_quanto_bf16_int8.safetensors"
+            "ckpts/ltxv_0.9.7_13B_distilled_quanto_bf16_int8.safetensors",
+            "ckpts/ltxv_0.9.7_13B_distilled_lora128_bf16.safetensors"
         ]
         
         text_encoder_files = [
-            "ckpts/T5_xxl_1.1_enc_bf16.safetensors",
-            "ckpts/T5_xxl_1.1_enc_quanto_bf16_int8.safetensors"
+            "ckpts/T5_xxl_1.1/T5_xxl_1.1_enc_bf16.safetensors",
+            "ckpts/T5_xxl_1.1/T5_xxl_1.1_enc_quanto_bf16_int8.safetensors"
         ]
         
         # Check which model files exist
@@ -333,9 +334,9 @@ def load_model():
                 logger.warning("Florence2 model not found, prompt enhancement disabled")
             
             # Llama 3.2 for text enhancement
-            if os.path.exists("ckpts/Llama3_2_quanto_bf16_int8.safetensors"):
+            if os.path.exists("ckpts/Llama3_2/Llama3_2_quanto_bf16_int8.safetensors"):
                 prompt_enhancer_llm_model = offload.fast_load_transformers_model(
-                    "ckpts/Llama3_2_quanto_bf16_int8.safetensors"
+                    "ckpts/Llama3_2/Llama3_2_quanto_bf16_int8.safetensors"
                 )
                 prompt_enhancer_llm_tokenizer = AutoTokenizer.from_pretrained("ckpts/Llama3_2")
                 logger.info("Loaded Llama 3.2 for prompt enhancement")
@@ -402,7 +403,7 @@ async def video_generation_worker():
                     "image_start": input_image,
                     "image_end": None,
                     "input_video": None,
-                    "sampling_steps": 50,
+                    "sampling_steps": 7,
                     "image_cond_noise_scale": 0.15,
                     "seed": seed,
                     "height": height,
