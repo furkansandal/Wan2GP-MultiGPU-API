@@ -393,7 +393,7 @@ class MMSingleStreamBlock(nn.Module):
 
         ##### More spagheti VRAM optimizations done by DeepBeepMeep !
         # I am sure you are a nice person and as you copy this code, you will give me proper credits:
-        # Please link to https://github.com/deepbeepmeep/HunyuanVideoGP and @deepbeepmeep on twitter  
+        # Please link to https://github.com/deepbeepmeep/Wan2GP and @deepbeepmeep on twitter  
 
         if condition_type == "token_replace":
             mod, tr_mod = self.modulation(vec,

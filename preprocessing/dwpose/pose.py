@@ -117,6 +117,20 @@ class PoseAnnotator:
         H, W, C = ori_img.shape
         with torch.no_grad():
             candidate, subset, det_result = self.pose_estimation(ori_img)
+            
+            if len(candidate) == 0:
+                # No detections - return empty results
+                empty_ret_data = {}
+                if self.use_body:
+                    empty_ret_data["detected_map_body"] = np.zeros((ori_h, ori_w, 3), dtype=np.uint8)
+                if self.use_face:
+                    empty_ret_data["detected_map_face"] = np.zeros((ori_h, ori_w, 3), dtype=np.uint8)
+                if self.use_body and self.use_face:
+                    empty_ret_data["detected_map_bodyface"] = np.zeros((ori_h, ori_w, 3), dtype=np.uint8)
+                if self.use_hand and self.use_body and self.use_face:
+                    empty_ret_data["detected_map_handbodyface"] = np.zeros((ori_h, ori_w, 3), dtype=np.uint8)
+                return empty_ret_data, np.array([])
+            
             nums, keys, locs = candidate.shape
             candidate[..., 0] /= float(W)
             candidate[..., 1] /= float(H)
@@ -202,17 +216,17 @@ class PoseBodyFaceAnnotator(PoseAnnotator):
 
 class OptimizedPoseBodyFaceVideoAnnotator:
     """Optimized video annotator with multiple optimization strategies"""
-    def __init__(self, cfg, num_workers=5, chunk_size=8):
+    def __init__(self, cfg, num_workers=2, chunk_size=8):
         self.cfg = cfg
         self.num_workers = num_workers
         self.chunk_size = chunk_size
-        self.use_body, self.use_face, self.use_hand = True, True, False
+        self.use_body, self.use_face, self.use_hand = True, True, True
         
         # Initialize one annotator per worker to avoid ONNX session conflicts
         self.annotators = []
         for _ in range(num_workers):
             annotator = OptimizedPoseAnnotator(cfg)
-            annotator.use_body, annotator.use_face, annotator.use_hand = True, True, False
+            annotator.use_body, annotator.use_face, annotator.use_hand = True, True, True
             self.annotators.append(annotator)
         
         self._current_worker = 0
@@ -239,8 +253,8 @@ class OptimizedPoseBodyFaceVideoAnnotator:
             # Process
             ret_data, _ = annotator.process(resized_image, frame.shape[:2])
             
-            if 'detected_map_bodyface' in ret_data:
-                return frame_idx, ret_data['detected_map_bodyface']
+            if 'detected_map_handbodyface' in ret_data:
+                return frame_idx, ret_data['detected_map_handbodyface']
             else:
                 # Create empty frame if no detection
                 h, w = frame.shape[:2]
@@ -267,8 +281,8 @@ class OptimizedPoseBodyFaceVideoAnnotator:
                 resized_image = resize_image(input_image, annotator.resize_size)
                 ret_data, _ = annotator.process(resized_image, frame.shape[:2])
                 
-                if 'detected_map_bodyface' in ret_data:
-                    ret_frames.append(ret_data['detected_map_bodyface'])
+                if 'detected_map_handbodyface' in ret_data:
+                    ret_frames.append(ret_data['detected_map_handbodyface'])
                 else:
                     h, w = frame.shape[:2]
                     ret_frames.append(np.zeros((h, w, 3), dtype=np.uint8))
@@ -293,12 +307,109 @@ class OptimizedPoseBodyFaceVideoAnnotator:
         return results
 
 
-# Alias for backward compatibility
-class PoseBodyFaceVideoAnnotator(OptimizedPoseBodyFaceVideoAnnotator):
-    """Backward compatible class name"""
+class OptimizedPoseBodyFaceHandVideoAnnotator:
+    """Optimized video annotator that includes hands, body, and face"""
     def __init__(self, cfg, num_workers=2, chunk_size=8):
-        # Use optimized version with conservative settings
-        super().__init__(cfg, num_workers=num_workers, chunk_size=chunk_size)
+        self.cfg = cfg
+        self.num_workers = num_workers
+        self.chunk_size = chunk_size
+        self.use_body, self.use_face, self.use_hand = True, True, True  # Enable hands
+        
+        # Initialize one annotator per worker to avoid ONNX session conflicts
+        self.annotators = []
+        for _ in range(num_workers):
+            annotator = OptimizedPoseAnnotator(cfg)
+            annotator.use_body, annotator.use_face, annotator.use_hand = True, True, True
+            self.annotators.append(annotator)
+        
+        self._current_worker = 0
+        self._worker_lock = threading.Lock()
+    
+    def _get_annotator(self):
+        """Get next available annotator in round-robin fashion"""
+        with self._worker_lock:
+            annotator = self.annotators[self._current_worker]
+            self._current_worker = (self._current_worker + 1) % len(self.annotators)
+            return annotator
+    
+    def _process_single_frame(self, frame_data):
+        """Process a single frame with error handling"""
+        frame, frame_idx = frame_data
+        try:
+            annotator = self._get_annotator()
+            
+            # Convert frame
+            frame = convert_to_numpy(frame)
+            input_image = HWC3(frame[..., ::-1])
+            resized_image = resize_image(input_image, annotator.resize_size)
+            
+            # Process
+            ret_data, _ = annotator.process(resized_image, frame.shape[:2])
+            
+            if 'detected_map_handbodyface' in ret_data:
+                return frame_idx, ret_data['detected_map_handbodyface']
+            else:
+                # Create empty frame if no detection
+                h, w = frame.shape[:2]
+                return frame_idx, np.zeros((h, w, 3), dtype=np.uint8)
+                
+        except Exception as e:
+            print(f"Error processing frame {frame_idx}: {e}")
+            # Return empty frame on error
+            h, w = frame.shape[:2] if hasattr(frame, 'shape') else (480, 640)
+            return frame_idx, np.zeros((h, w, 3), dtype=np.uint8)
+    
+    def forward(self, frames):
+        """Process video frames with optimizations"""
+        if len(frames) == 0:
+            return []
+        
+        # For small number of frames, use serial processing to avoid threading overhead
+        if len(frames) <= 4:
+            annotator = self.annotators[0]
+            ret_frames = []
+            for frame in frames:
+                frame = convert_to_numpy(frame)
+                input_image = HWC3(frame[..., ::-1])
+                resized_image = resize_image(input_image, annotator.resize_size)
+                ret_data, _ = annotator.process(resized_image, frame.shape[:2])
+                
+                if 'detected_map_handbodyface' in ret_data:
+                    ret_frames.append(ret_data['detected_map_handbodyface'])
+                else:
+                    h, w = frame.shape[:2]
+                    ret_frames.append(np.zeros((h, w, 3), dtype=np.uint8))
+            return ret_frames
+        
+        # For larger videos, use parallel processing
+        frame_data = [(frame, idx) for idx, frame in enumerate(frames)]
+        results = [None] * len(frames)
+        
+        # Process in chunks to manage memory
+        for chunk_start in range(0, len(frame_data), self.chunk_size * self.num_workers):
+            chunk_end = min(chunk_start + self.chunk_size * self.num_workers, len(frame_data))
+            chunk_data = frame_data[chunk_start:chunk_end]
+            
+            with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+                chunk_results = list(executor.map(self._process_single_frame, chunk_data))
+            
+            # Store results in correct order
+            for frame_idx, result in chunk_results:
+                results[frame_idx] = result
+        
+        return results
+
+
+# Choose which version you want to use:
+
+# Option 1: Body + Face only (original behavior)
+class PoseBodyFaceVideoAnnotator(OptimizedPoseBodyFaceVideoAnnotator):
+    """Backward compatible class name - Body and Face only"""
+# Option 2: Body + Face + Hands (if you want hands)
+class PoseBodyFaceHandVideoAnnotator(OptimizedPoseBodyFaceHandVideoAnnotator):
+    """Video annotator with hands, body, and face"""
+    def __init__(self, cfg):
+        super().__init__(cfg, num_workers=2, chunk_size=4)
 
 
 # Keep the existing utility functions

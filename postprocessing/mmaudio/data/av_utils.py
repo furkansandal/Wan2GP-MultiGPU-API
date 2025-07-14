@@ -131,24 +131,14 @@ from pathlib import Path
 import torch
 
 def remux_with_audio(video_path: Path, output_path: Path, audio: torch.Tensor, sampling_rate: int):
-    """Remux video with new audio using FFmpeg."""
+    from wan.utils.utils import extract_audio_tracks, combine_video_with_audio_tracks, cleanup_temp_audio_files
     with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
         temp_path = Path(f.name)
-    
-    try:
-        # Write audio as WAV
-        import torchaudio
-        torchaudio.save(str(temp_path), audio.unsqueeze(0) if audio.dim() == 1 else audio, sampling_rate)
-        
-        # Remux with FFmpeg
-        subprocess.run([
-            'ffmpeg', '-i', str(video_path), '-i', str(temp_path),
-            '-c:v', 'copy', '-c:a', 'aac', '-map', '0:v', '-map', '1:a',
-            '-shortest', '-y', str(output_path)
-        ], check=True, capture_output=True)
-        
-    finally:
-        temp_path.unlink(missing_ok=True)
+    temp_path_str= str(temp_path)
+    import torchaudio
+    torchaudio.save(temp_path_str, audio.unsqueeze(0) if audio.dim() == 1 else audio, sampling_rate)
+    combine_video_with_audio_tracks(video_path, [temp_path_str], output_path )
+    temp_path.unlink(missing_ok=True)
 
 def remux_with_audio_old(video_path: Path, audio: torch.Tensor, output_path: Path, sampling_rate: int):
     """

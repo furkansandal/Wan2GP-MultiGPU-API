@@ -1,4 +1,7 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
+##### Enjoy this spagheti VRAM optimizations done by DeepBeepMeep !
+# I am sure you are a nice person and as you copy this code, you will give me officially proper credits:
+# Please link to https://github.com/deepbeepmeep/Wan2GP and @deepbeepmeep on twitter  
 import math
 from einops import rearrange
 import torch
@@ -11,6 +14,7 @@ from typing import Union,Optional
 from mmgp import offload
 from .attention import pay_attention
 from torch.backends.cuda import sdp_kernel
+from wan.multitalk.multitalk_utils import get_attn_map_with_target
 
 __all__ = ['WanModel']
 
@@ -175,7 +179,71 @@ class WanSelfAttention(nn.Module):
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
 
 
-    def forward(self, xlist, grid_sizes, freqs, block_mask = None):
+    def text_cross_attention(self, xlist, context, return_q = False):
+        x = xlist[0]
+        xlist.clear()
+        b, n, d = x.size(0), self.num_heads, self.head_dim
+        nag_scale = offload.shared_state.get("_nag_scale",0)
+        # compute query, key, value
+        q = self.q(x)
+        del x
+        self.norm_q(q)
+        q= q.view(b, -1, n, d)
+        k = self.k(context)
+        self.norm_k(k)
+        k = k.view(context.shape[0], -1, n, d)
+        v = self.v(context).view(context.shape[0], -1, n, d)
+
+        if nag_scale <= 1 or len(k)==1:
+            qvl_list=[q, k, v]
+            if not return_q: del q
+            del k, v
+            x = pay_attention(qvl_list,  cross_attn= True)
+            x = x.flatten(2, 3)
+        else:
+            nag_tau = offload.shared_state["_nag_tau"]
+            nag_alpha = offload.shared_state["_nag_alpha"]
+            qvl_list=[q, k[:1], v[:1]]
+            x_pos = pay_attention(qvl_list,  cross_attn= True)
+            qvl_list=[q, k[1:], v[1:]]
+            if not return_q: del q
+            del k, v
+            x_neg = pay_attention(qvl_list,  cross_attn= True)
+
+            x_pos = x_pos.flatten(2, 3)
+            x_neg = x_neg.flatten(2, 3)
+            # Behold DeepBeepMeep as the NAG Butcher !: reduce highly VRAM consumption while at the same time turn the source in gibberish
+            x_neg.mul_(1-nag_scale)
+            x_neg.add_(x_pos, alpha= nag_scale)
+            x_guidance = x_neg
+            del x_neg
+            norm_positive = torch.norm(x_pos, p=1, dim=-1, keepdim=True)
+            norm_guidance = torch.norm(x_guidance, p=1, dim=-1, keepdim=True)
+            scale = norm_guidance / norm_positive
+            scale = torch.nan_to_num(scale, 10)
+            factor = 1 / (norm_guidance + 1e-7) * norm_positive * nag_tau
+            x_guidance = torch.where(scale > nag_tau, x_guidance * factor, x_guidance )
+            del norm_positive, norm_guidance 
+            x_pos.mul_(1 - nag_alpha)
+            x_guidance.mul_(nag_alpha)
+            x_guidance.add_(x_pos)
+            x = x_guidance
+
+            # x_guidance = x_pos * nag_scale - x_neg * (nag_scale - 1)
+            # norm_positive = torch.norm(x_pos, p=1, dim=-1, keepdim=True).expand(*x_pos.shape)
+            # norm_guidance = torch.norm(x_guidance, p=1, dim=-1, keepdim=True).expand(*x_guidance.shape)
+
+            # scale = norm_guidance / norm_positive
+            # scale = torch.nan_to_num(scale, 10)
+            # x_guidance[scale > nag_tau] =  x_guidance[scale > nag_tau] / (norm_guidance[scale > nag_tau] + 1e-7) * norm_positive[scale > nag_tau] * nag_tau
+
+            # x = x_guidance * nag_alpha + x_pos * (1 - nag_alpha)
+        if return_q:
+            return x, q
+        else:
+            return x, None
+    
+    def forward(self, xlist, grid_sizes, freqs, block_mask = None, ref_target_masks = None, ref_images_count = 0):
         r"""
         Args:
             x(Tensor): Shape [B, L, num_heads, C / num_heads]
@@ -190,7 +258,7 @@ class WanSelfAttention(nn.Module):
         # query, key, value function
         q = self.q(x)
         self.norm_q(q)
-        q = q.view(b, s, n, d) # !!!
+        q = q.view(b, s, n, d) 
         k = self.k(x)
         self.norm_k(k)
         k = k.view(b, s, n, d) 
@@ -200,6 +268,12 @@ class WanSelfAttention(nn.Module):
         del q,k
 
         q,k = apply_rotary_emb(qklist, freqs, head_first=False)
+
+        if ref_target_masks != None:
+            x_ref_attn_map = get_attn_map_with_target(q, k , grid_sizes, ref_target_masks=ref_target_masks, ref_images_count = ref_images_count)
+        else:
+            x_ref_attn_map = None
+
         chipmunk = offload.shared_state.get("_chipmunk", False) 
         if chipmunk and self.__class__ == WanSelfAttention:
             q = q.transpose(1,2)
@@ -225,30 +299,10 @@ class WanSelfAttention(nn.Module):
                 )
                 del q,k,v
 
-        # if not self._flag_ar_attention:
-        #     q = rope_apply(q, grid_sizes, freqs)
-        #     k = rope_apply(k, grid_sizes, freqs)
-        #     x = flash_attention(q=q, k=k, v=v, window_size=self.window_size)
-        # else:
-        #     q = rope_apply(q, grid_sizes, freqs)
-        #     k = rope_apply(k, grid_sizes, freqs)
-        #     q = q.to(torch.bfloat16)
-        #     k = k.to(torch.bfloat16)
-        #     v = v.to(torch.bfloat16)
 
-        #     with sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=False):
-        #         x = (
-        #             torch.nn.functional.scaled_dot_product_attention(
-        #                 q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), attn_mask=block_mask
-        #             )
-        #             .transpose(1, 2)
-        #             .contiguous()
-        #         )
-
-        # output
         x = x.flatten(2)
         x = self.o(x)
-        return x
+        return x, x_ref_attn_map
 
 
 class WanT2VCrossAttention(WanSelfAttention):
@@ -259,28 +313,7 @@ class WanT2VCrossAttention(WanSelfAttention):
             x(Tensor): Shape [B, L1, C]
             context(Tensor): Shape [B, L2, C]
         """
-        x = xlist[0]
-        xlist.clear()
-        b, n, d = x.size(0), self.num_heads, self.head_dim
-
-        # compute query, key, value
-        q = self.q(x)
-        del x
-        self.norm_q(q)
-        q= q.view(b, -1, n, d)
-        k = self.k(context)
-        self.norm_k(k)
-        k = k.view(b, -1, n, d)
-        v = self.v(context).view(b, -1, n, d)
-
-        # compute attention
-        v = v.contiguous().clone()
-        qvl_list=[q, k, v]
-        del q, k, v
-        x = pay_attention(qvl_list,  cross_attn= True)
-
-        # output
-        x = x.flatten(2)
+        x, _ = self.text_cross_attention( xlist, context)
         x = self.o(x)
         return x
 
@@ -308,30 +341,14 @@ class WanI2VCrossAttention(WanSelfAttention):
             context(Tensor): Shape [B, L2, C]
         """
 
-        ##### Enjoy this spagheti VRAM optimizations done by DeepBeepMeep !
-        # I am sure you are a nice person and as you copy this code, you will give me officially proper credits:
-        # Please link to https://github.com/deepbeepmeep/Wan2GP and @deepbeepmeep on twitter  
-
-        x = xlist[0]
-        xlist.clear()
 
         context_img = context[:, :257]
         context = context[:, 257:]
-        b, n, d = x.size(0), self.num_heads, self.head_dim
-
-        # compute query, key, value
-        q = self.q(x)
-        del x
-        self.norm_q(q)
-        q= q.view(b, -1, n, d)
-        k = self.k(context)
-        self.norm_k(k)
-        k = k.view(b, -1, n, d)
-        v = self.v(context).view(b, -1, n, d)
-
-        qkv_list = [q, k, v]
-        del k,v
-        x = pay_attention(qkv_list)
+        
+        x, q = self.text_cross_attention( xlist, context, return_q = True)
+        if len(q) != len(context_img):
+            context_img = context_img[:len(q)]
+        b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
 
         if audio_scale != None:
             audio_x = self.processor(q, audio_proj, grid_sizes[0], audio_context_lens)
@@ -342,12 +359,9 @@ class WanI2VCrossAttention(WanSelfAttention):
         qkv_list = [q, k_img, v_img]
         del q, k_img, v_img
         img_x = pay_attention(qkv_list)
-        # compute attention
-
+        img_x = img_x.flatten(2)
 
         # output
-        x = x.flatten(2)
-        img_x = img_x.flatten(2)
         x += img_x
         del img_x
         if audio_scale != None:
@@ -375,7 +389,11 @@ class WanAttentionBlock(nn.Module):
                  cross_attn_norm=False,
                  eps=1e-6,
                  block_id=None,
-                 block_no = 0
+                 block_no = 0,                 
+                 output_dim=0,
+                 norm_input_visual=True,
+                 class_range=24,
+                 class_interval=4,
                  ):
         super().__init__()
         self.dim = dim
@@ -409,6 +427,22 @@ class WanAttentionBlock(nn.Module):
         self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
         self.block_id = block_id
 
+        if output_dim > 0:
+            from wan.multitalk.attention import SingleStreamMutiAttention 
+            # init audio module
+            self.audio_cross_attn = SingleStreamMutiAttention(
+                    dim=dim,
+                    encoder_hidden_states_dim=output_dim,
+                    num_heads=num_heads,
+                    qk_norm=False,
+                    qkv_bias=True,
+                    eps=eps,
+                    norm_layer=WanRMSNorm,
+                    class_range=class_range,
+                    class_interval=class_interval
+                )
+            self.norm_x = WanLayerNorm(dim, eps, elementwise_affine=True)  if norm_input_visual else nn.Identity()
+    
     def forward(
         self,
         x,
@@ -423,6 +457,9 @@ class WanAttentionBlock(nn.Module):
         audio_proj= None,
         audio_context_lens= None,
         audio_scale=None,
+        multitalk_audio=None,
+        multitalk_masks=None,
+        ref_images_count=0,
     ):
         r"""
         Args:
@@ -466,11 +503,10 @@ class WanAttentionBlock(nn.Module):
 
         xlist = [x_mod.to(attention_dtype)]
         del x_mod
-        y = self.self_attn( xlist, grid_sizes, freqs, block_mask)
+        y, x_ref_attn_map = self.self_attn( xlist, grid_sizes, freqs, block_mask = block_mask, ref_target_masks = multitalk_masks, ref_images_count = ref_images_count)
         y = y.to(dtype)
 
-        if cam_emb != None: 
-            y = self.projector(y)
+        if cam_emb != None: y = self.projector(y)
 
         x, y = reshape_latent(x , latent_frames), reshape_latent(y , latent_frames)
         x.addcmul_(y, e[2])
@@ -481,6 +517,25 @@ class WanAttentionBlock(nn.Module):
         ylist= [y]
         del y
         x += self.cross_attn(ylist, context, grid_sizes, audio_proj, audio_scale, audio_context_lens).to(dtype)
+
+        if multitalk_audio != None:
+            # cross attn of multitalk audio
+            y = self.norm_x(x)
+            y = y.to(attention_dtype)
+            if ref_images_count == 0:
+                x += self.audio_cross_attn(y, encoder_hidden_states=multitalk_audio, shape=grid_sizes, x_ref_attn_map=x_ref_attn_map)
+            else:
+                y_shape = y.shape
+                y = y.reshape(y_shape[0], grid_sizes[0], -1)
+                y = y[:, ref_images_count:]
+                y = y.reshape(y_shape[0], -1, y_shape[-1])
+                grid_sizes_alt = [grid_sizes[0]-ref_images_count, *grid_sizes[1:]]
+                y = self.audio_cross_attn(y, encoder_hidden_states=multitalk_audio, shape=grid_sizes_alt, x_ref_attn_map=x_ref_attn_map)
+                y = y.reshape(y_shape[0], grid_sizes[0]-ref_images_count, -1)
+                x = x.reshape(y_shape[0], grid_sizes[0], -1)
+                x[:, ref_images_count:] += y
+                x = x.reshape(y_shape[0], -1, y_shape[-1])
+            del y
 
         y = self.norm2(x)
 
@@ -517,6 +572,71 @@ class WanAttentionBlock(nn.Module):
                     else:
                         x.add_(hint, alpha= scale)
         return x 
+
+class AudioProjModel(ModelMixin, ConfigMixin):
+    def __init__(
+        self,
+        seq_len=5,
+        seq_len_vf=12,
+        blocks=12,  
+        channels=768, 
+        intermediate_dim=512,
+        output_dim=768,
+        context_tokens=32,
+        norm_output_audio=False,
+    ):
+        super().__init__()
+
+        self.seq_len = seq_len
+        self.blocks = blocks
+        self.channels = channels
+        self.input_dim = seq_len * blocks * channels  
+        self.input_dim_vf = seq_len_vf * blocks * channels
+        self.intermediate_dim = intermediate_dim
+        self.context_tokens = context_tokens
+        self.output_dim = output_dim
+
+        # define multiple linear layers
+        self.proj1 = nn.Linear(self.input_dim, intermediate_dim)
+        self.proj1_vf = nn.Linear(self.input_dim_vf, intermediate_dim)
+        self.proj2 = nn.Linear(intermediate_dim, intermediate_dim)
+        self.proj3 = nn.Linear(intermediate_dim, context_tokens * output_dim)
+        self.norm = nn.LayerNorm(output_dim) if norm_output_audio else nn.Identity()
+
+    def forward(self, audio_embeds, audio_embeds_vf):
+        video_length = audio_embeds.shape[1] + audio_embeds_vf.shape[1]
+        B, _, _, S, C = audio_embeds.shape
+
+        # process audio of first frame
+        audio_embeds = rearrange(audio_embeds, "bz f w b c -> (bz f) w b c")
+        batch_size, window_size, blocks, channels = audio_embeds.shape
+        audio_embeds = audio_embeds.view(batch_size, window_size * blocks * channels)
+
+        # process audio of latter frame
+        audio_embeds_vf = rearrange(audio_embeds_vf, "bz f w b c -> (bz f) w b c")
+        batch_size_vf, window_size_vf, blocks_vf, channels_vf = audio_embeds_vf.shape
+        audio_embeds_vf = audio_embeds_vf.view(batch_size_vf, window_size_vf * blocks_vf * channels_vf)
+
+        # first projection
+        audio_embeds = torch.relu(self.proj1(audio_embeds)) 
+        audio_embeds_vf = torch.relu(self.proj1_vf(audio_embeds_vf)) 
+        audio_embeds = rearrange(audio_embeds, "(bz f) c -> bz f c", bz=B)
+        audio_embeds_vf = rearrange(audio_embeds_vf, "(bz f) c -> bz f c", bz=B)
+        audio_embeds_c = torch.concat([audio_embeds, audio_embeds_vf], dim=1) 
+        audio_embeds_vf = audio_embeds = None
+        batch_size_c, N_t, C_a = audio_embeds_c.shape
+        audio_embeds_c = audio_embeds_c.view(batch_size_c*N_t, C_a)
+
+        # second projection
+        audio_embeds_c = torch.relu(self.proj2(audio_embeds_c))
+
+        context_tokens = self.proj3(audio_embeds_c).reshape(batch_size_c*N_t, self.context_tokens, self.output_dim)
+        audio_embeds_c = None
+        # normalization and reshape
+        context_tokens = self.norm(context_tokens)
+        context_tokens = rearrange(context_tokens, "(bz f) m c -> bz f m c", f=video_length)
+
+        return context_tokens
 
 
 
@@ -595,18 +715,26 @@ class Head(nn.Module):
 
 class MLPProj(torch.nn.Module):
 
-    def __init__(self, in_dim, out_dim):
+    def __init__(self, in_dim, out_dim, flf_pos_emb=False):
         super().__init__()
 
         self.proj = torch.nn.Sequential(
             torch.nn.LayerNorm(in_dim), torch.nn.Linear(in_dim, in_dim),
             torch.nn.GELU(), torch.nn.Linear(in_dim, out_dim),
             torch.nn.LayerNorm(out_dim))
+        
+        if flf_pos_emb:  # NOTE: we only use this for `flf2v`
+            FIRST_LAST_FRAME_CONTEXT_TOKEN_NUMBER = 257 * 2
+            self.emb_pos = nn.Parameter(
+                torch.zeros(1, FIRST_LAST_FRAME_CONTEXT_TOKEN_NUMBER, 1280))
 
     def forward(self, image_embeds):
+        if hasattr(self, 'emb_pos'):
+            bs, n, d = image_embeds.shape
+            image_embeds = image_embeds.view(-1, 2 * n, d)
+            image_embeds = image_embeds + self.emb_pos
         clip_extra_context_tokens = self.proj(image_embeds)
         return clip_extra_context_tokens
-
 
 class WanModel(ModelMixin, ConfigMixin):
     def setup_chipmunk(self):
@@ -696,45 +824,18 @@ class WanModel(ModelMixin, ConfigMixin):
                  qk_norm=True,
                  cross_attn_norm=True,
                  eps=1e-6,
+                 flf = False,
                  recammaster = False,
                  inject_sample_info = False,
                  fantasytalking_dim = 0,
+                 multitalk_output_dim = 0,
+                 audio_window=5,
+                 intermediate_dim=512,
+                 context_tokens=32,
+                 vae_scale=4, # vae timedownsample scale
+                 norm_input_visual=True,
+                 norm_output_audio=True,
                  ):
-        r"""
-        Initialize the diffusion model backbone.
-
-        Args:
-            model_type (`str`, *optional*, defaults to 't2v'):
-                Model variant - 't2v' (text-to-video) or 'i2v' (image-to-video)
-            patch_size (`tuple`, *optional*, defaults to (1, 2, 2)):
-                3D patch dimensions for video embedding (t_patch, h_patch, w_patch)
-            text_len (`int`, *optional*, defaults to 512):
-                Fixed length for text embeddings
-            in_dim (`int`, *optional*, defaults to 16):
-                Input video channels (C_in)
-            dim (`int`, *optional*, defaults to 2048):
-                Hidden dimension of the transformer
-            ffn_dim (`int`, *optional*, defaults to 8192):
-                Intermediate dimension in feed-forward network
-            freq_dim (`int`, *optional*, defaults to 256):
-                Dimension for sinusoidal time embeddings
-            text_dim (`int`, *optional*, defaults to 4096):
-                Input dimension for text embeddings
-            out_dim (`int`, *optional*, defaults to 16):
-                Output video channels (C_out)
-            num_heads (`int`, *optional*, defaults to 16):
-                Number of attention heads
-            num_layers (`int`, *optional*, defaults to 32):
-                Number of transformer blocks
-            window_size (`tuple`, *optional*, defaults to (-1, -1)):
-                Window size for local attention (-1 indicates global attention)
-            qk_norm (`bool`, *optional*, defaults to True):
-                Enable query/key normalization
-            cross_attn_norm (`bool`, *optional*, defaults to False):
-                Enable cross-attention normalization
-            eps (`float`, *optional*, defaults to 1e-6):
-                Epsilon value for normalization layers
-        """
 
         super().__init__()
 
@@ -760,6 +861,14 @@ class WanModel(ModelMixin, ConfigMixin):
         self.block_mask = None
         self.inject_sample_info = inject_sample_info
 
+        self.norm_output_audio = norm_output_audio
+        self.audio_window = audio_window
+        self.intermediate_dim = intermediate_dim
+        self.vae_scale = vae_scale
+
+        multitalk = multitalk_output_dim > 0
+        self.multitalk = multitalk
+
         # embeddings
         self.patch_embedding = nn.Conv3d(
             in_dim, dim, kernel_size=patch_size, stride=patch_size)
@@ -780,7 +889,7 @@ class WanModel(ModelMixin, ConfigMixin):
             cross_attn_type = 't2v_cross_attn' if model_type == 't2v' else 'i2v_cross_attn'
             self.blocks = nn.ModuleList([
                 WanAttentionBlock(cross_attn_type, dim, ffn_dim, num_heads,
-                                window_size, qk_norm, cross_attn_norm, eps, block_no =i)
+                                window_size, qk_norm, cross_attn_norm, eps, block_no =i, output_dim=multitalk_output_dim, norm_input_visual=norm_input_visual)
                 for i in range(num_layers)
             ])
 
@@ -790,7 +899,18 @@ class WanModel(ModelMixin, ConfigMixin):
         # buffers (don't use register_buffer otherwise dtype will be changed in to())
 
         if model_type == 'i2v':
-            self.img_emb = MLPProj(1280, dim)
+            self.img_emb = MLPProj(1280, dim, flf_pos_emb = flf)
+
+        if multitalk :
+            # init audio adapter
+            self.audio_proj = AudioProjModel(
+                        seq_len=audio_window,
+                        seq_len_vf=audio_window+vae_scale-1,
+                        intermediate_dim=intermediate_dim,
+                        output_dim=multitalk_output_dim,
+                        context_tokens=context_tokens,
+                        norm_output_audio=norm_output_audio,
+                    )
 
         # initialize weights
         self.init_weights()
@@ -806,7 +926,10 @@ class WanModel(ModelMixin, ConfigMixin):
             self.blocks = nn.ModuleList([
                 WanAttentionBlock('t2v_cross_attn', self.dim, self.ffn_dim, self.num_heads, self.window_size, self.qk_norm,
                                     self.cross_attn_norm, self.eps, block_no =i,
-                                    block_id=self.vace_layers_mapping[i] if i in self.vace_layers else None)
+                                    block_id=self.vace_layers_mapping[i] if i in self.vace_layers else None,
+                                    output_dim=multitalk_output_dim,
+                                    norm_input_visual=norm_input_visual,
+                                    )
                 for i in range(self.num_layers)
             ])
 
@@ -846,6 +969,10 @@ class WanModel(ModelMixin, ConfigMixin):
 
         for block in self.blocks:
             layer_list2 += [block.norm3]
+
+        if hasattr(self, "audio_proj"):
+            for block in self.blocks:
+                layer_list2 += [block.norm_x]
 
         if hasattr(self, "fps_embedding"):
             layer_list2 += [self.fps_embedding, self.fps_projection, self.fps_projection[0], self.fps_projection[2]]
@@ -1006,6 +1133,9 @@ class WanModel(ModelMixin, ConfigMixin):
         audio_proj=None,
         audio_context_lens=None,
         audio_scale=None,
+        multitalk_audio = None,
+        multitalk_masks = None,
+        ref_images_count = 0,    
 
     ):
         # patch_dtype =  self.patch_embedding.weight.dtype
@@ -1084,13 +1214,34 @@ class WanModel(ModelMixin, ConfigMixin):
                 e0 = e0 + self.fps_projection(fps_emb).unflatten(1, (6, self.dim))
 
         # context
-        context = [self.text_embedding( torch.cat( [u, u.new_zeros(self.text_len - u.size(0), u.size(1))] ).unsqueeze(0) ) for u in context  ] 
+        context = [self.text_embedding( u ) for u in context  ] 
         
         if clip_fea is not None:
             context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
-            context = [ torch.cat( [context_clip, u ], dim=1 ) for u in context  ] 
+            context_list = []
+            for one_context in context: 
+                if len(one_context) != len(context_clip):
+                    context_list.append( torch.cat( [context_clip.repeat(len(one_context), 1, 1), one_context ], dim=1 ))
+                else:
+                    context_list.append( torch.cat( [context_clip, one_context ], dim=1 ))
+        else:
+            context_list = context
 
-        context_list = context
+        if multitalk_audio != None:
+            multitalk_audio_list = []
+            for audio in multitalk_audio:
+                audio = self.audio_proj(*audio) 
+                audio = torch.concat(audio.split(1), dim=2).to(context[0])
+                multitalk_audio_list.append(audio)
+            audio = None
+        else:
+            multitalk_audio_list = [None] * len(x_list)
+
+        if multitalk_masks != None:
+            multitalk_masks_list = multitalk_masks
+        else:
+            multitalk_masks_list = [None] * len(x_list)
+
         if audio_scale != None: 
             audio_scale_list = audio_scale
         else:
@@ -1105,6 +1256,7 @@ class WanModel(ModelMixin, ConfigMixin):
             block_mask = block_mask,
             audio_proj=audio_proj,
             audio_context_lens=audio_context_lens,
+            ref_images_count=ref_images_count,
             )
 
         if vace_context == None:
@@ -1137,7 +1289,7 @@ class WanModel(ModelMixin, ConfigMixin):
                         if self.accumulated_err[cur_x_id]<self.magcache_thresh and self.accumulated_steps[cur_x_id]<=self.magcache_K:
                             skip_forward = True
                             if i == 0 and x_id == 0: self.cache_skipped_steps += 1
-                            print(f"skip: step={current_step} for x_id={cur_x_id}, accum error {self.accumulated_err[cur_x_id]}")
+                            # print(f"skip: step={current_step} for x_id={cur_x_id}, accum error {self.accumulated_err[cur_x_id]}")
                         else:
                             skip_forward = False
                             self.accumulated_err[cur_x_id], self.accumulated_steps[cur_x_id], self.accumulated_ratio[cur_x_id] = 0, 0, 1.0
@@ -1209,11 +1361,11 @@ class WanModel(ModelMixin, ConfigMixin):
                         continue
                     x_list[0] = block(x_list[0], context = context_list[0], audio_scale= audio_scale_list[0], e= e0, **kwargs)
                 else:
-                    for i, (x, context, hints, audio_scale, should_calc) in enumerate(zip(x_list, context_list, hints_list, audio_scale_list, x_should_calc)):
+                    for i, (x, context, hints, audio_scale, multitalk_audio, multitalk_masks, should_calc) in enumerate(zip(x_list, context_list, hints_list, audio_scale_list, multitalk_audio_list, multitalk_masks_list, x_should_calc)):
                         if should_calc:
-                            x_list[i] = block(x, context = context, hints= hints, audio_scale= audio_scale, e= e0, **kwargs)
+                            x_list[i] = block(x, context = context, hints= hints, audio_scale= audio_scale, multitalk_audio = multitalk_audio, multitalk_masks =multitalk_masks, e= e0, **kwargs)
                             del x
-                    context, hints = None, None
+                    context = hints = audio_embedding  = None
 
         if self.enable_cache != None:
             if joint_pass:

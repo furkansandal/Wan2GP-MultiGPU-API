@@ -44,7 +44,7 @@ class DTT2V:
         self.dtype = dtype
         self.num_train_timesteps = config.num_train_timesteps
         self.param_dtype = config.param_dtype
-
+        self.text_len = config.text_len 
         self.text_encoder = T5EncoderModel(
             text_len=config.text_len,
             dtype=config.t5_dtype,
@@ -251,11 +251,15 @@ class DTT2V:
 
         if self._interrupt:
             return None
+        text_len = self.text_len
         prompt_embeds = self.text_encoder([input_prompt], self.device)[0]
         prompt_embeds  = prompt_embeds.to(self.dtype).to(self.device)
+        prompt_embeds = torch.cat([prompt_embeds, prompt_embeds.new_zeros(text_len -prompt_embeds.size(0), prompt_embeds.size(1)) ]).unsqueeze(0) 
+
         if self.do_classifier_free_guidance:
             negative_prompt_embeds = self.text_encoder([n_prompt], self.device)[0]
             negative_prompt_embeds  = negative_prompt_embeds.to(self.dtype).to(self.device)
+            negative_prompt_embeds = torch.cat([negative_prompt_embeds, negative_prompt_embeds.new_zeros(text_len -negative_prompt_embeds.size(0), negative_prompt_embeds.size(1)) ]).unsqueeze(0) 
 
         if self._interrupt:
             return None
@@ -335,7 +339,7 @@ class DTT2V:
             self.model.compute_teacache_threshold(self.model.cache_start_step, time_steps_comb, self.model.cache_multiplier)
             del time_steps_comb
         else:
-            trans.enable_cache == None
+            self.model.enable_cache = None
         from mmgp import offload
         freqs = get_rotary_pos_embed(latents.shape[1 :], enable_RIFLEx= False) 
         kwrags = {

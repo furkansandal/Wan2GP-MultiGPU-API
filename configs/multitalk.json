@@ -11,5 +11,5 @@
   "num_layers": 40,
   "out_dim": 16,
   "text_len": 512,
-  "flf": true
+  "multitalk_output_dim": 768
 }

@@ -14,6 +14,9 @@ from PIL import Image
 import numpy as np
 from rembg import remove, new_session
 import random
+import ffmpeg
+import os
+import tempfile
 
 __all__ = ['cache_video', 'cache_image', 'str2bool']
 
@@ -32,9 +35,6 @@ def seed_everything(seed: int):
         
 def resample(video_fps, video_frames_count, max_target_frames_count, target_fps, start_target_frame ):
     import math
-
-    if video_fps < target_fps :
-        video_fps = target_fps
 
     video_frame_duration = 1 /video_fps
     target_frame_duration = 1 / target_fps 
@@ -160,8 +160,8 @@ def calculate_new_dimensions(canvas_height, canvas_width, height, width, fit_int
     new_width = round( width * scale / block_size) * block_size
     return new_height, new_width
 
-def resize_and_remove_background(img_list, budget_width, budget_height, rm_background, fit_into_canvas = False ):
-    if rm_background  > 0:
+def resize_and_remove_background(img_list, budget_width, budget_height, rm_background, ignore_first, fit_into_canvas = False ):
+    if rm_background:
         session = new_session() 
 
     output_list =[]
@@ -183,7 +183,7 @@ def resize_and_remove_background(img_list, budget_width, budget_height, rm_backg
             new_height = int( round(height * scale / 16) * 16)
             new_width = int( round(width * scale / 16) * 16)
             resized_image= img.resize((new_width,new_height), resample=Image.Resampling.LANCZOS) 
-        if rm_background == 1 or rm_background == 2 and i > 0 :
+        if rm_background  and not (ignore_first and i == 0) :
             # resized_image = remove(resized_image, session=session, alpha_matting_erode_size = 1,alpha_matting_background_threshold = 70, alpha_foreground_background_threshold = 100, alpha_matting = True, bgcolor=[255, 255, 255, 0]).convert('RGB')
             resized_image = remove(resized_image, session=session, alpha_matting_erode_size = 1, alpha_matting = True, bgcolor=[255, 255, 255, 0]).convert('RGB')
         output_list.append(resized_image) #alpha_matting_background_threshold = 30, alpha_foreground_background_threshold = 200,
@@ -405,4 +405,138 @@ def create_progress_hook(filename):
     def hook(block_num, block_size, total_size):
         return progress_hook(block_num, block_size, total_size, filename)
     return hook
+
+import ffmpeg
+import os
+import tempfile
+
+def extract_audio_tracks(source_video, verbose=False, query_only= False):
+    """
+    Extract all audio tracks from source video to temporary files.
+    
+    Args:
+        source_video: Path to video with audio to extract
+        verbose: Enable verbose output (default: False)
+        
+    Returns:
+        List of temporary audio file paths, or empty list if no audio tracks
+    """
+    try:
+        # Check if source video has audio
+        probe = ffmpeg.probe(source_video)
+        audio_streams = [s for s in probe['streams'] if s['codec_type'] == 'audio']
+        
+        if not audio_streams:
+            if query_only: return 0
+            if verbose:
+                print(f"No audio track found in {source_video}")
+            return []
+        if query_only: return len(audio_streams)
+        if verbose:
+            print(f"Found {len(audio_streams)} audio track(s)")
+        
+        # Create temporary audio files for each track
+        temp_audio_files = []
+        for i in range(len(audio_streams)):
+            fd, temp_path = tempfile.mkstemp(suffix=f'_track{i}.aac', prefix='audio_')
+            os.close(fd)  # Close file descriptor immediately
+            temp_audio_files.append(temp_path)
+        
+        # Extract each audio track
+        for i, temp_path in enumerate(temp_audio_files):
+            (ffmpeg
+             .input(source_video)
+             .output(temp_path, **{f'map': f'0:a:{i}', 'acodec': 'aac'})
+             .overwrite_output()
+             .run(quiet=not verbose))
+        
+        return temp_audio_files
+        
+    except ffmpeg.Error as e:
+        print(f"FFmpeg error during audio extraction: {e}")
+        return []
+    except Exception as e:
+        print(f"Error during audio extraction: {e}")
+        return []
+
+def combine_video_with_audio_tracks(target_video, audio_tracks, output_video, verbose=False):
+    """
+    Combine video with audio tracks. Output duration matches video length exactly.
+    
+    Args:
+        target_video: Path to video to receive the audio
+        audio_tracks: List of audio file paths to combine
+        output_video: Path for the output video
+        verbose: Enable verbose output (default: False)
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    if not audio_tracks:
+        if verbose:
+            print("No audio tracks to combine")
+        return False
+    
+    try:
+        # Get video duration to ensure exact alignment
+        video_probe = ffmpeg.probe(target_video)
+        video_duration = float(video_probe['streams'][0]['duration'])
+        
+        if verbose:
+            print(f"Target video duration: {video_duration:.3f} seconds")
+        
+        # Combine target video with all audio tracks, force video duration
+        video = ffmpeg.input(target_video).video
+        audio_inputs = [ffmpeg.input(audio_path).audio for audio_path in audio_tracks]
+        
+        # Create output with video duration as master timing
+        inputs = [video] + audio_inputs
+        (ffmpeg
+         .output(*inputs, output_video, 
+                vcodec='copy', 
+                acodec='copy', 
+                t=video_duration)  # Force exact video duration
+         .overwrite_output()
+         .run(quiet=not verbose))
+        
+        if verbose:
+            print(f"Successfully created {output_video} with {len(audio_tracks)} audio track(s) aligned to video duration")
+        return True
+        
+    except ffmpeg.Error as e:
+        print(f"FFmpeg error during video combination: {e}")
+        return False
+    except Exception as e:
+        print(f"Error during video combination: {e}")
+        return False
+
+def cleanup_temp_audio_files(audio_tracks, verbose=False):
+    """
+    Clean up temporary audio files.
+    
+    Args:
+        audio_tracks: List of audio file paths to delete
+        verbose: Enable verbose output (default: False)
+        
+    Returns:
+        Number of files successfully deleted
+    """
+    deleted_count = 0
+    
+    for audio_path in audio_tracks:
+        try:
+            if os.path.exists(audio_path):
+                os.unlink(audio_path)
+                deleted_count += 1
+                if verbose:
+                    print(f"Cleaned up {audio_path}")
+        except PermissionError:
+            print(f"Warning: Could not delete {audio_path} (file may be in use)")
+        except Exception as e:
+            print(f"Warning: Error deleting {audio_path}: {e}")
+    
+    if verbose and deleted_count > 0:
+        print(f"Successfully deleted {deleted_count} temporary audio file(s)")
+    
+    return deleted_count
 

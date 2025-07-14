@@ -11,7 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import matplotlib
+matplotlib.use('TkAgg') 
 import matplotlib.pyplot as plt
 from flask import Flask, request, jsonify, render_template
 import os
@@ -21,7 +22,6 @@ import torch
 import yaml
 import matplotlib
 import argparse
-matplotlib.use('Agg')
 
 app = Flask(__name__, static_folder='static', template_folder='templates')
 

@@ -531,7 +531,7 @@ class CLIPModel:
             seq_len=self.model.max_text_len - 2,
             clean='whitespace')
 
-    def visual(self, videos):
+    def visual(self, videos,):
         # preprocess
         size = (self.model.image_size,) * 2
         videos = torch.cat([
