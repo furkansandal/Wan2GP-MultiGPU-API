@@ -14,18 +14,16 @@ import time
 import uuid
 import tempfile
 import shutil
-from pathlib import Path
-from typing import Optional, Dict, Any, Union
+from typing import Optional
 from datetime import datetime
 import requests
 from io import BytesIO
 from PIL import Image
 import numpy as np
-import yaml
 
 # FastAPI imports
-from fastapi import FastAPI, HTTPException, BackgroundTasks, File, UploadFile, Form
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
@@ -33,8 +31,7 @@ import uvicorn
 # Import project modules
 from mmgp import offload, profile_type
 from ltx_video.ltxv import LTXV
-from wan.utils.utils import calculate_new_dimensions
-from wan.modules.attention import get_attention_modes, set_attention_mode
+from wan.modules.attention import get_supported_attention_modes
 from transformers import AutoModelForCausalLM, AutoProcessor, AutoTokenizer
 
 # Configure logging
@@ -251,13 +248,16 @@ def load_model():
     logger.info("Starting model loading...")
     
     # Set attention mode to xformers
-    available_modes = get_attention_modes()
+    available_modes = get_supported_attention_modes()
     logger.info(f"Available attention modes: {available_modes}")
     if 'xformers' in available_modes:
-        set_attention_mode('xformers')
+        # Set attention mode using offload shared state
+        offload.shared_state["_attention"] = 'xformers'
         logger.info("Set attention mode to xformers")
     else:
-        logger.warning("xformers not available, using default attention mode")
+        # Use auto mode as fallback
+        offload.shared_state["_attention"] = 'auto'
+        logger.warning("xformers not available, using auto attention mode")
     
     # Determine device
     if torch.cuda.is_available():
@@ -549,7 +549,7 @@ async def generate_video(request: VideoGenerationRequest):
     return VideoGenerationResponse(
         task_id=task_id,
         status="pending",
-        message=f"Task queued for processing",
+        message="Task queued for processing",
         queue_position=queue_position
     )
 
