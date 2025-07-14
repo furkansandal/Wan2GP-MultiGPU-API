@@ -211,7 +211,10 @@ async def enhance_prompt(prompt: str, image: Image.Image) -> str:
                 text="<MORE_DETAILED_CAPTION>", 
                 images=image, 
                 return_tensors="pt"
-            ).to(device)
+            )
+            # Move inputs to device and ensure correct dtype
+            inputs = {k: v.to(device, dtype=torch.bfloat16) if torch.is_tensor(v) and v.dtype.is_floating_point else v.to(device) if torch.is_tensor(v) else v 
+                     for k, v in inputs.items()}
             
             with torch.no_grad():
                 generated_ids = prompt_enhancer_image_caption_model.generate(
@@ -361,8 +364,9 @@ def load_model():
                 prompt_enhancer_image_caption_model = AutoModelForCausalLM.from_pretrained(
                     "ckpts/Florence2", 
                     trust_remote_code=True,
-                    torch_dtype=torch.bfloat16
-                ).to(device)
+                    torch_dtype=torch.bfloat16,
+                    device_map=device
+                )
                 prompt_enhancer_image_caption_processor = AutoProcessor.from_pretrained(
                     "ckpts/Florence2", 
                     trust_remote_code=True
@@ -479,7 +483,7 @@ async def video_generation_worker():
                     "image_start": input_image,
                     "image_end": None,
                     "input_video": None,
-                    "sampling_steps": 7,
+                    "sampling_steps": 7,  # Distilled model uses fewer steps
                     "image_cond_noise_scale": 0.15,
                     "seed": seed,
                     "height": height,
@@ -487,7 +491,7 @@ async def video_generation_worker():
                     "frame_num": MAX_FRAMES,
                     "frame_rate": 30,
                     "fit_into_canvas": True,
-                    "device": device,
+                    "device": str(device),  # Convert device to string
                     "VAE_tile_size": None,
                 }
                 
@@ -495,14 +499,22 @@ async def video_generation_worker():
                 start_time = time.time()
                 async with model_lock:
                     logger.info(f"Generating video for task {task_id}...")
+                    logger.info(f"Generation params: resolution={width}x{height}, frames={MAX_FRAMES}, seed={seed}")
                     loop = asyncio.get_event_loop()
-                    video_tensor = await loop.run_in_executor(
-                        None,
-                        lambda: model.generate(**generation_params)
-                    )
+                    try:
+                        video_tensor = await loop.run_in_executor(
+                            None,
+                            lambda: model.generate(**generation_params)
+                        )
+                    except Exception as e:
+                        logger.error(f"Error in model.generate: {str(e)}")
+                        logger.error(f"Error type: {type(e).__name__}")
+                        import traceback
+                        logger.error(f"Traceback: {traceback.format_exc()}")
+                        raise
                 
                 if video_tensor is None:
-                    raise Exception("Video generation failed")
+                    raise Exception("Video generation failed - model returned None")
                 
                 # Save video
                 temp_dir = tempfile.mkdtemp()
