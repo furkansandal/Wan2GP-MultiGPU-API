@@ -20,6 +20,7 @@ import requests
 from io import BytesIO
 from PIL import Image
 import numpy as np
+import argparse
 
 # FastAPI imports
 from fastapi import FastAPI, HTTPException
@@ -336,11 +337,23 @@ def load_model():
     
     try:
         # Model paths
-        model_files = [
-            "ckpts/ltxv_0.9.7_13B_dev_quanto_bf16_int8.safetensors",  # Dev model
-            "ckpts/ltxv_0.9.7_13B_distilled_bf16.safetensors",  # Distilled model
-            "ckpts/ltxv_0.9.7_13B_distilled_lora128_bf16.safetensors"  # Distilled LoRA model
-        ]
+        force_distilled = os.environ.get("FORCE_DISTILLED", "0") == "1"
+        
+        if force_distilled:
+            # Prioritize distilled models when --distilled is used
+            model_files = [
+                "ckpts/ltxv_0.9.7_13B_distilled_lora128_bf16.safetensors",  # Distilled LoRA model (preferred)
+                "ckpts/ltxv_0.9.7_13B_distilled_bf16.safetensors",  # Distilled model
+                "ckpts/ltxv_0.9.7_13B_dev_quanto_bf16_int8.safetensors",  # Dev model (fallback)
+            ]
+            logger.info("Distilled model mode enabled via --distilled flag")
+        else:
+            # Default order
+            model_files = [
+                "ckpts/ltxv_0.9.7_13B_dev_quanto_bf16_int8.safetensors",  # Dev model
+                "ckpts/ltxv_0.9.7_13B_distilled_bf16.safetensors",  # Distilled model
+                "ckpts/ltxv_0.9.7_13B_distilled_lora128_bf16.safetensors"  # Distilled LoRA model
+            ]
         
         text_encoder_files = [
             "ckpts/T5_xxl_1.1/T5_xxl_1.1_enc_bf16.safetensors",
@@ -766,11 +779,21 @@ async def cleanup_task(task_id: str, delay: int = 600):
 
 
 if __name__ == "__main__":
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="WGP LTX Video API Server")
+    parser.add_argument("--distilled", action="store_true", help="Force use of distilled model")
+    parser.add_argument("--port", type=int, default=8000, help="Port to run the server on")
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind the server to")
+    args = parser.parse_args()
+    
+    # Store distilled preference globally
+    os.environ["FORCE_DISTILLED"] = "1" if args.distilled else "0"
+    
     # Run the API server
     uvicorn.run(
         "wgp_api:app",
-        host="0.0.0.0",
-        port=8000,
+        host=args.host,
+        port=args.port,
         reload=False,
         log_level="info"
     )
