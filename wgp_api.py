@@ -536,8 +536,9 @@ async def video_generation_worker():
                 width, height = SUPPORTED_RESOLUTIONS[task_info.request.aspect_ratio]
                 
                 # Handle seed
+                print(f"Pre defined seed: {task_info.request.seed}")
                 seed = task_info.request.seed if task_info.request.seed != -1 else int(time.time())
-                
+                print(f"New seed: {seed}")
                 # Enhance prompt if requested
                 prompt_to_use = task_info.request.prompt
                 if task_info.request.enhance_prompt_with_llm:
