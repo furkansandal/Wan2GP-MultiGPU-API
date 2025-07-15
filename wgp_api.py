@@ -105,8 +105,13 @@ class LTXV(BaseLTXV):
             # This is what wgp.py does
             try:
                 from mmgp import offload
-                # Load LoRA into the transformer
-                offload.load_lora_transformer(self.pipeline.video_pipeline.transformer, lora_files[0])
+                # Load LoRA into the transformer using the correct function
+                # wgp.py uses load_loras_into_model, not load_lora_transformer
+                offload.load_loras_into_model(
+                    self.pipeline.video_pipeline.transformer, 
+                    [lora_files[0]], 
+                    activate_all_loras=True
+                )
                 logger.info(f"LoRA loaded successfully: {lora_files[0]}")
             except Exception as e:
                 logger.error(f"Failed to load LoRA: {e}")
@@ -501,20 +506,12 @@ def load_model():
             logger.info(f"Detected LoRA model: {model_filepath}")
             # The base transformer is already loaded, now we need to apply LoRA
             try:
-                # Load LoRA weights directly into transformer
-                from safetensors.torch import load_file
-                lora_weights = load_file(model_filepath)
-                
-                # Apply LoRA weights to transformer
-                transformer = model.pipeline.video_pipeline.transformer
-                transformer_state_dict = transformer.state_dict()
-                
-                # Update transformer weights with LoRA weights
-                for key, value in lora_weights.items():
-                    if key in transformer_state_dict:
-                        transformer_state_dict[key] = value
-                
-                transformer.load_state_dict(transformer_state_dict, strict=False)
+                # Use offload's load_loras_into_model function like wgp.py does
+                offload.load_loras_into_model(
+                    model.pipeline.video_pipeline.transformer,
+                    [model_filepath],
+                    activate_all_loras=True
+                )
                 logger.info(f"LoRA weights applied to transformer from: {model_filepath}")
             except Exception as e:
                 logger.error(f"Failed to apply LoRA weights: {e}")
