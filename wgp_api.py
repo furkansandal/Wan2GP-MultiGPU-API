@@ -98,23 +98,8 @@ class LTXV(BaseLTXV):
         # Add interrupt flag for pipeline compatibility
         self._interrupt = False
         
-        # Now we need to manually load LoRA if it was in the original list
-        if lora_files:
-            logger.info(f"Loading LoRA file: {lora_files[0]}")
-            # The transformer should already be loaded, now we need to apply LoRA
-            # This is what wgp.py does
-            try:
-                from mmgp import offload
-                # Load LoRA into the transformer using the correct function
-                # wgp.py uses load_loras_into_model, not load_lora_transformer
-                offload.load_loras_into_model(
-                    self.pipeline.video_pipeline.transformer, 
-                    [lora_files[0]], 
-                    activate_all_loras=True
-                )
-                logger.info(f"LoRA loaded successfully: {lora_files[0]}")
-            except Exception as e:
-                logger.error(f"Failed to load LoRA: {e}")
+        # Don't load LoRA here - it will be loaded after offload profile is created
+        # This is required for MMGP to properly manage LoRA memory
         
         # Fix distilled detection
         self.distilled = any("lora" in name or "distilled" in name for name in self._original_model_filepath)
@@ -501,20 +486,11 @@ def load_model():
         # Log whether model is distilled
         logger.info(f"Model loaded. Distilled: {model.distilled}")
         
-        # Check if we're using a LoRA model and load it
+        # Store LoRA filepath for later loading (after offload profile)
+        lora_filepath = None
         if model_filepath and "lora" in model_filepath:
             logger.info(f"Detected LoRA model: {model_filepath}")
-            # The base transformer is already loaded, now we need to apply LoRA
-            try:
-                # Use offload's load_loras_into_model function like wgp.py does
-                offload.load_loras_into_model(
-                    model.pipeline.video_pipeline.transformer,
-                    [model_filepath],
-                    activate_all_loras=True
-                )
-                logger.info(f"LoRA weights applied to transformer from: {model_filepath}")
-            except Exception as e:
-                logger.error(f"Failed to apply LoRA weights: {e}")
+            lora_filepath = model_filepath
         
         # Load prompt enhancement models
         logger.info("Loading prompt enhancement models...")
@@ -605,6 +581,20 @@ def load_model():
                 **kwargs
             )
             logger.info(f"Set offload profile to HighRAM_HighVRAM (profile {profile})")
+            
+            # Now load LoRA if we have one (after offload profile is set)
+            if lora_filepath:
+                try:
+                    logger.info(f"Loading LoRA weights from: {lora_filepath}")
+                    offload.load_loras_into_model(
+                        pipe["transformer"],
+                        [lora_filepath],
+                        activate_all_loras=True
+                    )
+                    logger.info(f"LoRA weights applied successfully")
+                except Exception as e:
+                    logger.error(f"Failed to apply LoRA weights: {e}")
+                    
         except Exception as e:
             logger.warning(f"Failed to set offload profile: {e}. Continuing without profile optimization.")
             offloadobj = None
