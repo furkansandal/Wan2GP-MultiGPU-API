@@ -452,6 +452,14 @@ def load_model():
                 logger.info("Loaded Llama 3.2 for prompt enhancement")
             else:
                 logger.warning("Llama 3.2 model not found, LLM enhancement disabled")
+            
+            # Assign enhancement models to LTXV instance
+            if hasattr(model.pipeline, 'video_pipeline'):
+                model.pipeline.video_pipeline.prompt_enhancer_image_caption_model = prompt_enhancer_image_caption_model
+                model.pipeline.video_pipeline.prompt_enhancer_image_caption_processor = prompt_enhancer_image_caption_processor
+                model.pipeline.video_pipeline.prompt_enhancer_llm_model = prompt_enhancer_llm_model
+                model.pipeline.video_pipeline.prompt_enhancer_llm_tokenizer = prompt_enhancer_llm_tokenizer
+                logger.info("Assigned prompt enhancement models to pipeline")
                 
         except Exception as e:
             logger.warning(f"Failed to load prompt enhancement models: {e}")
@@ -474,6 +482,12 @@ def load_model():
             "text_encoder": pipeline.video_pipeline.text_encoder,
             "latent_upsampler": pipeline.latent_upsampler
         }
+        
+        # Add prompt enhancement models to pipe if loaded
+        if prompt_enhancer_image_caption_model:
+            pipe["prompt_enhancer_image_caption_model"] = prompt_enhancer_image_caption_model
+        if prompt_enhancer_llm_model:
+            pipe["prompt_enhancer_llm_model"] = prompt_enhancer_llm_model
         
         # Profile configuration based on wgp.py
         kwargs = {}
