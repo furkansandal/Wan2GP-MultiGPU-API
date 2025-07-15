@@ -31,7 +31,7 @@ from contextlib import asynccontextmanager
 
 # Import project modules
 from mmgp import offload
-from ltx_video.ltxv import LTXV
+from ltx_video.ltxv import LTXV as BaseLTXV
 from wan.modules.attention import get_supported_attention_modes
 from transformers import AutoModelForCausalLM, AutoProcessor, AutoTokenizer
 
@@ -45,6 +45,15 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+
+class LTXV(BaseLTXV):
+    """Wrapper class for LTXV that adds missing attributes for pipeline compatibility"""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Add interrupt flag for pipeline compatibility
+        self._interrupt = False
 
 # Constants
 MAX_FRAMES = 129
