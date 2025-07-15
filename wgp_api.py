@@ -55,47 +55,44 @@ class LTXV(BaseLTXV):
     """Wrapper class for LTXV that adds missing attributes for pipeline compatibility"""
     
     def __init__(self, model_filepath, *args, **kwargs):
-        # For distilled LoRA models, we need to handle the base model requirement
-        original_filepath = model_filepath
-        is_lora_file = any("lora" in name for name in model_filepath)
+        # Store original filepath for later use
+        self._original_model_filepath = model_filepath.copy() if isinstance(model_filepath, list) else [model_filepath]
         
-        if is_lora_file:
-            # If it's a LoRA file, we need a base model too
-            # Add the dev model as base
-            base_models = [
-                "ckpts/ltxv_0.9.7_13B_dev_quanto_bf16_int8.safetensors",
-                "ckpts/ltxv_0.9.7_13B_dev_bf16.safetensors",
-                "ckpts/ltxv_0.9.7_13B_distilled_bf16.safetensors"
-            ]
-            
-            # Find first available base model
-            base_model = None
-            for bm in base_models:
-                if os.path.exists(bm):
-                    base_model = bm
-                    break
-            
-            if base_model:
-                # Add base model to the list (it will be filtered out later, but needed for loading)
-                model_filepath = [base_model] + model_filepath
-                logger.info(f"Using base model {base_model} for LoRA {original_filepath}")
+        # CRITICAL FIX: Don't let base LTXV filter out LoRA files
+        # We need to override the base class behavior
         
+        # First, let's check what files we have
+        logger.info(f"Model files provided: {model_filepath}")
+        
+        # Call parent init - it will filter out LoRA files, but we'll fix that later
         super().__init__(model_filepath, *args, **kwargs)
+        
         # Add interrupt flag for pipeline compatibility
         self._interrupt = False
         
-        # Override distilled detection to check for "distilled" in filename too
-        if original_filepath:
-            model_names = original_filepath if isinstance(original_filepath, list) else [original_filepath]
-            self.distilled = any("lora" in name or "distilled" in name for name in model_names)
+        # Now we need to manually load LoRA if it was in the original list
+        lora_files = [f for f in self._original_model_filepath if "lora" in f and os.path.exists(f)]
+        if lora_files:
+            logger.info(f"Loading LoRA file: {lora_files[0]}")
+            # The transformer should already be loaded, now we need to apply LoRA
+            # This is what wgp.py does
+            try:
+                from mmgp import offload
+                # Load LoRA into the transformer
+                offload.load_lora_transformer(self.pipeline.video_pipeline.transformer, lora_files[0])
+                logger.info(f"LoRA loaded successfully: {lora_files[0]}")
+            except Exception as e:
+                logger.error(f"Failed to load LoRA: {e}")
+        
+        # Fix distilled detection
+        self.distilled = any("lora" in name or "distilled" in name for name in self._original_model_filepath)
     
     def generate(self, *args, **kwargs):
         # Pass all parameters directly to the base class
-        # Let ltxv.py handle the logic
         return super().generate(*args, **kwargs)
 
 # Constants
-MAX_FRAMES = 129  # User preference for video length
+MAX_FRAMES = 129  # User requested 129 frames
 # LTXV recommended resolutions (width x height)
 SUPPORTED_RESOLUTIONS = {
     "9:16": (704, 1216),   # LTXV portrait
@@ -471,6 +468,29 @@ def load_model():
         
         # Log whether model is distilled
         logger.info(f"Model loaded. Distilled: {model.distilled}")
+        
+        # Check if we're using a LoRA model and load it
+        if model_filepath and "lora" in model_filepath:
+            logger.info(f"Detected LoRA model: {model_filepath}")
+            # The base transformer is already loaded, now we need to apply LoRA
+            try:
+                # Load LoRA weights directly into transformer
+                from safetensors.torch import load_file
+                lora_weights = load_file(model_filepath)
+                
+                # Apply LoRA weights to transformer
+                transformer = model.pipeline.video_pipeline.transformer
+                transformer_state_dict = transformer.state_dict()
+                
+                # Update transformer weights with LoRA weights
+                for key, value in lora_weights.items():
+                    if key in transformer_state_dict:
+                        transformer_state_dict[key] = value
+                
+                transformer.load_state_dict(transformer_state_dict, strict=False)
+                logger.info(f"LoRA weights applied to transformer from: {model_filepath}")
+            except Exception as e:
+                logger.error(f"Failed to apply LoRA weights: {e}")
         
         # Load prompt enhancement models
         logger.info("Loading prompt enhancement models...")
