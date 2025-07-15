@@ -425,8 +425,8 @@ def load_model():
             model_filepath=[model_filepath],  # Convert to list
             text_encoder_filepath=text_encoder_filepath,
             dtype=torch.bfloat16,
-            VAE_dtype=torch.bfloat16,
-            mixed_precision_transformer=True  # 16-bit transformer calculation
+            VAE_dtype=torch.float32,  # Match wgp.py - use float32 for VAE
+            mixed_precision_transformer=False  # Match wgp.py default
         )
         
         # Log whether model is distilled
@@ -567,23 +567,23 @@ async def video_generation_worker():
                 if task_info.request.enhance_prompt_with_llm:
                     prompt_to_use = await enhance_prompt(task_info.request.prompt, input_image)
                 
-                # Prepare generation parameters
+                # Prepare generation parameters - matching wgp.py exactly
                 generation_params = {
                     "input_prompt": prompt_to_use,
                     "n_prompt": task_info.request.negative_prompt,
                     "image_start": input_image,
                     "image_end": None,
-                    "input_video": None,
-                    "sampling_steps": 50,  # Use default sampling steps to avoid timestep issues
-                    "image_cond_noise_scale": 0.0,
+                    "input_video": None,  # wgp.py uses this for LTXV
+                    "sampling_steps": 50,
+                    "image_cond_noise_scale": 0.0,  # Pipeline default, not ltxv.py default
                     "seed": seed,
                     "height": height,
                     "width": width,
                     "frame_num": MAX_FRAMES,
                     "frame_rate": 30,
                     "fit_into_canvas": True,
-                    "device": str(device),  # Convert device to string
-                    "VAE_tile_size": (0, 0),  # (z_tile, hw_tile) - 0 means no tiling
+                    "device": str(device),
+                    "VAE_tile_size": (0, 0),
                 }
                 
                 # Generate video
