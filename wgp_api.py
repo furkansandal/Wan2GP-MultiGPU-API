@@ -54,6 +54,11 @@ class LTXV(BaseLTXV):
         super().__init__(*args, **kwargs)
         # Add interrupt flag for pipeline compatibility
         self._interrupt = False
+        
+        # Override distilled detection to check for "distilled" in filename too
+        if hasattr(self, 'model_filepath') and self.model_filepath:
+            model_names = self.model_filepath if isinstance(self.model_filepath, list) else [self.model_filepath]
+            self.distilled = any("lora" in name or "distilled" in name for name in model_names)
     
     def generate(self, *args, **kwargs):
         # For distilled models, we need to handle sampling_steps differently
@@ -66,12 +71,13 @@ class LTXV(BaseLTXV):
 
 # Constants
 MAX_FRAMES = 129
+# LTXV recommended resolutions (width x height)
 SUPPORTED_RESOLUTIONS = {
-    "9:16": (405, 720),   # 720p portrait
-    "16:9": (1280, 720),  # 720p landscape
-    "1:1": (720, 720),    # Square
-    "3:4": (540, 720),    # Portrait
-    "4:3": (960, 720)     # Traditional
+    "9:16": (704, 1216),   # LTXV portrait
+    "16:9": (1216, 704),   # LTXV landscape (default)
+    "1:1": (960, 960),     # Square
+    "3:4": (912, 1216),    # Portrait
+    "4:3": (1216, 912)     # Traditional
 }
 
 DEFAULT_NEGATIVE_PROMPT = "low quality, worst quality, deformed, distorted, disfigured, motion smear, motion artifacts, fused fingers, bad anatomy, weird hand, ugly"
@@ -332,7 +338,8 @@ def load_model():
         # Model paths
         model_files = [
             "ckpts/ltxv_0.9.7_13B_dev_quanto_bf16_int8.safetensors",  # Dev model
-            "ckpts/ltxv_0.9.7_13B_distilled_bf16.safetensors"  # Distilled model
+            "ckpts/ltxv_0.9.7_13B_distilled_bf16.safetensors",  # Distilled model
+            "ckpts/ltxv_0.9.7_13B_distilled_lora128_bf16.safetensors"  # Distilled LoRA model
         ]
         
         text_encoder_files = [
@@ -374,6 +381,9 @@ def load_model():
             VAE_dtype=torch.bfloat16,
             mixed_precision_transformer=True  # 16-bit transformer calculation
         )
+        
+        # Log whether model is distilled
+        logger.info(f"Model loaded. Distilled: {model.distilled}")
         
         # Load prompt enhancement models
         logger.info("Loading prompt enhancement models...")
