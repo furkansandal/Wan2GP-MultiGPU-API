@@ -51,14 +51,39 @@ logger = logging.getLogger(__name__)
 class LTXV(BaseLTXV):
     """Wrapper class for LTXV that adds missing attributes for pipeline compatibility"""
     
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, model_filepath, *args, **kwargs):
+        # For distilled LoRA models, we need to handle the base model requirement
+        original_filepath = model_filepath
+        is_lora_file = any("lora" in name for name in model_filepath)
+        
+        if is_lora_file:
+            # If it's a LoRA file, we need a base model too
+            # Add the dev model as base
+            base_models = [
+                "ckpts/ltxv_0.9.7_13B_dev_quanto_bf16_int8.safetensors",
+                "ckpts/ltxv_0.9.7_13B_dev_bf16.safetensors",
+                "ckpts/ltxv_0.9.7_13B_distilled_bf16.safetensors"
+            ]
+            
+            # Find first available base model
+            base_model = None
+            for bm in base_models:
+                if os.path.exists(bm):
+                    base_model = bm
+                    break
+            
+            if base_model:
+                # Add base model to the list (it will be filtered out later, but needed for loading)
+                model_filepath = [base_model] + model_filepath
+                logger.info(f"Using base model {base_model} for LoRA {original_filepath}")
+        
+        super().__init__(model_filepath, *args, **kwargs)
         # Add interrupt flag for pipeline compatibility
         self._interrupt = False
         
         # Override distilled detection to check for "distilled" in filename too
-        if hasattr(self, 'model_filepath') and self.model_filepath:
-            model_names = self.model_filepath if isinstance(self.model_filepath, list) else [self.model_filepath]
+        if original_filepath:
+            model_names = original_filepath if isinstance(original_filepath, list) else [original_filepath]
             self.distilled = any("lora" in name or "distilled" in name for name in model_names)
     
     def generate(self, *args, **kwargs):
