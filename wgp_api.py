@@ -54,6 +54,15 @@ class LTXV(BaseLTXV):
         super().__init__(*args, **kwargs)
         # Add interrupt flag for pipeline compatibility
         self._interrupt = False
+    
+    def generate(self, *args, **kwargs):
+        # For distilled models, we need to handle sampling_steps differently
+        # The distilled model uses predefined timesteps in the config
+        if self.distilled and 'sampling_steps' in kwargs:
+            # Remove sampling_steps as distilled model uses timesteps from config
+            kwargs.pop('sampling_steps')
+        
+        return super().generate(*args, **kwargs)
 
 # Constants
 MAX_FRAMES = 129
@@ -322,7 +331,8 @@ def load_model():
     try:
         # Model paths
         model_files = [
-            "ckpts/ltxv_0.9.7_13B_dev_quanto_bf16_int8.safetensors"  # Add dev model
+            "ckpts/ltxv_0.9.7_13B_dev_quanto_bf16_int8.safetensors",  # Dev model
+            "ckpts/ltxv_0.9.7_13B_distilled_bf16.safetensors"  # Distilled model
         ]
         
         text_encoder_files = [
@@ -492,7 +502,7 @@ async def video_generation_worker():
                     "image_start": input_image,
                     "image_end": None,
                     "input_video": None,
-                    "sampling_steps": 7,  # Distilled model uses fewer steps
+                    "sampling_steps": 50,  # Use default sampling steps to avoid timestep issues
                     "image_cond_noise_scale": 0.15,
                     "seed": seed,
                     "height": height,
