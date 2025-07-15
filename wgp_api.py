@@ -492,7 +492,7 @@ async def video_generation_worker():
                     "frame_rate": 30,
                     "fit_into_canvas": True,
                     "device": str(device),  # Convert device to string
-                    "VAE_tile_size": None,
+                    "VAE_tile_size": (0, 0),  # (z_tile, hw_tile) - 0 means no tiling
                 }
                 
                 # Generate video
