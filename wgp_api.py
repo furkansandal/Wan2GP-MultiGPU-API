@@ -21,6 +21,7 @@ from io import BytesIO
 from PIL import Image
 import numpy as np
 import argparse
+import random
 
 # FastAPI imports
 from fastapi import FastAPI, HTTPException
@@ -537,7 +538,7 @@ async def video_generation_worker():
                 
                 # Handle seed
                 print(f"Pre defined seed: {task_info.request.seed}")
-                seed = task_info.request.seed if task_info.request.seed != -1 else int(time.time())
+                seed = task_info.request.seed if task_info.request.seed != -1 else int(random.randint(0, 999999999))
                 print(f"New seed: {seed}")
                 # Enhance prompt if requested
                 prompt_to_use = task_info.request.prompt
