@@ -340,6 +340,14 @@ def load_model():
     
     logger.info("Starting model loading...")
     
+    # Set deterministic behavior for reproducible results
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    # Enable fully deterministic operations
+    torch.use_deterministic_algorithms(True)
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    logger.info("Set CUDA deterministic mode for reproducible results")
+    
     # Set attention mode to xformers
     available_modes = get_supported_attention_modes()
     logger.info(f"Available attention modes: {available_modes}")
