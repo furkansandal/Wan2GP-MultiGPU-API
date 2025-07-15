@@ -575,7 +575,7 @@ async def video_generation_worker():
                     "image_end": None,
                     "input_video": None,
                     "sampling_steps": 50,  # Use default sampling steps to avoid timestep issues
-                    "image_cond_noise_scale": 0.15,
+                    "image_cond_noise_scale": 0.0,
                     "seed": seed,
                     "height": height,
                     "width": width,
