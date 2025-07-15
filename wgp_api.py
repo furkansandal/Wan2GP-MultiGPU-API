@@ -690,7 +690,10 @@ def save_video_tensor(tensor: torch.Tensor, output_path: str, fps: int = 30):
     import cv2
     
     # Convert tensor to numpy array
+    # First convert BFloat16 to Float32 as numpy doesn't support BFloat16
     # Tensor shape: (C, T, H, W) -> (T, H, W, C)
+    if tensor.dtype == torch.bfloat16:
+        tensor = tensor.float()
     video_np = tensor.permute(1, 2, 3, 0).cpu().numpy()
     
     # Denormalize from [-1, 1] to [0, 255]
