@@ -14,7 +14,7 @@ import time
 import uuid
 import tempfile
 import shutil
-from typing import Optional
+from typing import Optional, Union
 from datetime import datetime
 import requests
 from io import BytesIO
@@ -22,6 +22,7 @@ from PIL import Image
 import numpy as np
 import argparse
 import random
+import cv2
 
 # FastAPI imports
 from fastapi import FastAPI, HTTPException
@@ -36,6 +37,7 @@ from mmgp import offload
 from ltx_video.ltxv import LTXV as BaseLTXV
 from wan.modules.attention import get_supported_attention_modes
 from transformers import AutoModelForCausalLM, AutoProcessor, AutoTokenizer
+from ltx_video.pipelines import crf_compressor
 
 # Configure logging
 logging.basicConfig(
@@ -88,16 +90,12 @@ class LTXV(BaseLTXV):
             self.distilled = any("lora" in name or "distilled" in name for name in model_names)
     
     def generate(self, *args, **kwargs):
-        # For distilled models, we need to handle sampling_steps differently
-        # The distilled model uses predefined timesteps in the config
-        if self.distilled and 'sampling_steps' in kwargs:
-            # Remove sampling_steps as distilled model uses timesteps from config
-            kwargs.pop('sampling_steps')
-        
+        # Pass all parameters directly to the base class
+        # Let ltxv.py handle the logic
         return super().generate(*args, **kwargs)
 
 # Constants
-MAX_FRAMES = 129
+MAX_FRAMES = 129  # User preference for video length
 # LTXV recommended resolutions (width x height)
 SUPPORTED_RESOLUTIONS = {
     "9:16": (704, 1216),   # LTXV portrait
@@ -230,6 +228,48 @@ class TaskInfo:
         self.created_at = datetime.now()
         self.updated_at = datetime.now()
         self.temp_dir = None
+
+
+def load_image_to_tensor_with_resize_and_crop(
+    image_input: Union[str, Image.Image],
+    target_height: int = 512,
+    target_width: int = 768,
+    just_crop: bool = False,
+) -> torch.Tensor:
+    """Load and process an image into a tensor - matching ltxv.py exactly"""
+    if isinstance(image_input, str):
+        image = Image.open(image_input).convert("RGB")
+    elif isinstance(image_input, Image.Image):
+        image = image_input
+    else:
+        raise ValueError("image_input must be either a file path or a PIL Image object")
+
+    input_width, input_height = image.size
+    aspect_ratio_target = target_width / target_height
+    aspect_ratio_frame = input_width / input_height
+    if aspect_ratio_frame > aspect_ratio_target:
+        new_width = int(input_height * aspect_ratio_target)
+        new_height = input_height
+        x_start = (input_width - new_width) // 2
+        y_start = 0
+    else:
+        new_width = input_width
+        new_height = int(input_width / aspect_ratio_target)
+        x_start = 0
+        y_start = (input_height - new_height) // 2
+
+    image = image.crop((x_start, y_start, x_start + new_width, y_start + new_height))
+    if not just_crop:
+        image = image.resize((target_width, target_height))
+
+    image = np.array(image)
+    image = cv2.GaussianBlur(image, (3, 3), 0)
+    frame_tensor = torch.from_numpy(image).float()
+    frame_tensor = crf_compressor.compress(frame_tensor / 255.0) * 255.0
+    frame_tensor = frame_tensor.permute(2, 0, 1)
+    frame_tensor = (frame_tensor / 127.5) - 1.0
+    # Create 5D tensor: (batch_size=1, channels=3, num_frames=1, height, width)
+    return frame_tensor.unsqueeze(0).unsqueeze(2)
 
 
 async def download_image(url: str) -> Image.Image:
@@ -558,6 +598,17 @@ async def video_generation_worker():
                 # Get resolution
                 width, height = SUPPORTED_RESOLUTIONS[task_info.request.aspect_ratio]
                 
+                # Process image with same method as ltxv.py
+                # This is crucial for maintaining quality throughout the video
+                processed_image_tensor = load_image_to_tensor_with_resize_and_crop(
+                    input_image, 
+                    target_height=height, 
+                    target_width=width,
+                    just_crop=False
+                )
+                # Convert back to PIL for model.generate (it will process again internally)
+                # For now, keep using the original image until we implement conditioning_items
+                
                 # Handle seed
                 print(f"Pre defined seed: {task_info.request.seed}")
                 seed = task_info.request.seed if task_info.request.seed != -1 else int(random.randint(0, 999999999))
@@ -573,10 +624,12 @@ async def video_generation_worker():
                     "n_prompt": task_info.request.negative_prompt,
                     "image_start": input_image,
                     "image_end": None,
-                    "input_video": None,  # wgp.py uses this for LTXV
+                    "input_video": None,  # wgp.py uses pre_video_guide here for LTXV
+                    "denoising_strength": 1.0,  # wgp.py uses this for LTXV
                     "sampling_steps": 50,
                     "image_cond_noise_scale": 0.0,  # Pipeline default, not ltxv.py default
                     "seed": seed,
+                    "strength": 1.0,  # Image conditioning strength
                     "height": height,
                     "width": width,
                     "frame_num": MAX_FRAMES,
