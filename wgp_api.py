@@ -59,19 +59,46 @@ class LTXV(BaseLTXV):
         self._original_model_filepath = model_filepath.copy() if isinstance(model_filepath, list) else [model_filepath]
         
         # CRITICAL FIX: Don't let base LTXV filter out LoRA files
-        # We need to override the base class behavior
+        # Instead, we'll handle LoRA files separately
         
         # First, let's check what files we have
         logger.info(f"Model files provided: {model_filepath}")
         
-        # Call parent init - it will filter out LoRA files, but we'll fix that later
-        super().__init__(model_filepath, *args, **kwargs)
+        # Separate LoRA files from base model files
+        lora_files = [f for f in model_filepath if "lora" in f]
+        base_files = [f for f in model_filepath if "lora" not in f]
+        
+        # If we only have LoRA files and no base model, we need to find the base model
+        if lora_files and not base_files:
+            # For distilled LoRA, wgp.py uses the dev model as base (line 1671-1672 in wgp.py)
+            # First try the dev model (which is what wgp.py uses as dependency)
+            dev_model_path = "ckpts/ltxv_0.9.7_13B_dev_bf16.safetensors"
+            dev_quanto_model_path = "ckpts/ltxv_0.9.7_13B_dev_quanto_bf16_int8.safetensors"
+            
+            if os.path.exists(dev_model_path):
+                base_files = [dev_model_path]
+                logger.info(f"Using dev model as base (like wgp.py): {dev_model_path}")
+            elif os.path.exists(dev_quanto_model_path):
+                base_files = [dev_quanto_model_path]
+                logger.info(f"Using quanto dev model as base: {dev_quanto_model_path}")
+            else:
+                # Try to find any base model in the ckpts directory
+                import glob
+                possible_base_models = glob.glob("ckpts/ltxv_0.9.7_13B_*.safetensors")
+                base_models = [f for f in possible_base_models if "lora" not in f]
+                if base_models:
+                    base_files = [base_models[0]]
+                    logger.info(f"Found base model: {base_files[0]}")
+                else:
+                    raise ValueError("No base model found. Please provide a base model file.")
+        
+        # Call parent init with base files only (it will filter out LoRA anyway)
+        super().__init__(base_files, *args, **kwargs)
         
         # Add interrupt flag for pipeline compatibility
         self._interrupt = False
         
         # Now we need to manually load LoRA if it was in the original list
-        lora_files = [f for f in self._original_model_filepath if "lora" in f and os.path.exists(f)]
         if lora_files:
             logger.info(f"Loading LoRA file: {lora_files[0]}")
             # The transformer should already be loaded, now we need to apply LoRA
