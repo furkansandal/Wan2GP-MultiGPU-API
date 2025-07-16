@@ -136,6 +136,10 @@ async def lifespan(app: FastAPI):
     worker_task = asyncio.create_task(video_generation_worker())
     logger.info("Video generation worker started")
     
+    # Start cleanup task
+    cleanup_task = asyncio.create_task(cleanup_old_tasks())
+    logger.info("Cleanup task started")
+    
     logger.info("API server ready!")
     yield
     
@@ -941,9 +945,6 @@ async def cleanup_old_tasks():
 
 
 if __name__ == "__main__":
-    # Start cleanup task
-    asyncio.create_task(cleanup_old_tasks())
-    
     # Run the server
     uvicorn.run(
         app,
