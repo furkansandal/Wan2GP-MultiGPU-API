@@ -684,7 +684,7 @@ async def enhance_prompt(prompt: str, image: Image.Image) -> str:
                 generated_ids = prompt_enhancer_image_caption_model.generate(
                     input_ids=inputs["input_ids"],
                     pixel_values=inputs["pixel_values"],
-                    max_new_tokens=4096,
+                    max_new_tokens=2048,
                     early_stopping=False,
                     do_sample=False,
                     num_beams=3,
@@ -727,7 +727,7 @@ Create an enhanced video generation prompt that brings this scene to life with m
             with torch.no_grad():
                 outputs = prompt_enhancer_llm_model.generate(
                     **inputs,
-                    max_new_tokens=4096,
+                    max_new_tokens=200,
                     temperature=0.8,
                     do_sample=True,
                     top_p=0.9,
