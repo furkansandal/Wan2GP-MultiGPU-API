@@ -441,10 +441,16 @@ def load_model():
             # Llama 3.2 for prompt enhancement
             if os.path.exists("ckpts/Llama3_2/Llama3_2_quanto_bf16_int8.safetensors"):
                 # Load with attention optimization
-                prompt_enhancer_llm_model = offload.fast_load_transformers_model(
-                    "ckpts/Llama3_2/Llama3_2_quanto_bf16_int8.safetensors",
-                    configKwargs={"_attn_implementation": "flash_attention_2"}  # Try Flash Attention
-                )
+                try:
+                    prompt_enhancer_llm_model = offload.fast_load_transformers_model(
+                        "ckpts/Llama3_2/Llama3_2_quanto_bf16_int8.safetensors",
+                        configKwargs={"_attn_implementation": "flash_attention_2"}  # Try Flash Attention
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to load with Flash Attention: {e}, retrying without")
+                    prompt_enhancer_llm_model = offload.fast_load_transformers_model(
+                        "ckpts/Llama3_2/Llama3_2_quanto_bf16_int8.safetensors"
+                    )
                 prompt_enhancer_llm_tokenizer = AutoTokenizer.from_pretrained("ckpts/Llama3_2")
                 logger.info("Loaded Llama 3.2 for prompt enhancement")
             else:
