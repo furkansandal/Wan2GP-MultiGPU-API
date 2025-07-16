@@ -36,7 +36,7 @@ from contextlib import asynccontextmanager
 # Import project modules
 from mmgp import offload
 from ltx_video.ltxv import LTXV as BaseLTXV
-from wan.modules.attention import get_supported_attention_modes
+# Attention utilities imported in load_model function
 from transformers import AutoModelForCausalLM, AutoProcessor, AutoTokenizer
 from ltx_video.pipelines import crf_compressor
 
@@ -334,9 +334,15 @@ def load_model():
         torch.backends.cudnn.deterministic = True
         logger.info("Set CUDA deterministic mode for reproducible results")
         
-        # Set attention mode
-        supported_modes = get_supported_attention_modes()
-        logger.info(f"Available attention modes: {supported_modes}")
+        # Import attention utilities and log available modes
+        try:
+            from wan.modules.attention import get_attention_modes, get_supported_attention_modes
+            available_modes = get_attention_modes()
+            supported_modes = get_supported_attention_modes()
+            logger.info(f"Available attention modes: {available_modes}")
+            logger.info(f"Supported attention modes on this GPU: {supported_modes}")
+        except Exception as e:
+            logger.warning(f"Could not get attention modes: {e}")
         
         # Use shared state for attention (matching wgp.py)
         offload.shared_state["_attention"] = attention_mode
@@ -441,20 +447,18 @@ def load_model():
             # Llama 3.2 for prompt enhancement
             if os.path.exists("ckpts/Llama3_2/Llama3_2_quanto_bf16_int8.safetensors"):
                 # Load model with optimal attention implementation
-                # Try different attention mechanisms based on availability
+                # Llama doesn't support xformers through config, use SDPA or native attention
                 attn_config = None
                 if args.attention == "xformers":
-                    try:
-                        from xformers.ops import memory_efficient_attention
-                        attn_config = {"_attn_implementation": "xformers"}
-                        logger.info("Using xformers for Llama model")
-                    except:
-                        logger.warning("xformers not available, falling back to default")
-                elif args.attention == "sage" or args.attention == "sage2":
-                    # SageAttention is handled differently, no config needed
-                    logger.info(f"Will use {args.attention} for Llama model")
+                    # Xformers will be handled at runtime through offload.shared_state
+                    attn_config = {"_attn_implementation": "eager"}  # Use eager for xformers override
+                    logger.info("Will use xformers for Llama model at runtime")
+                elif args.attention in ["sage", "sage2"]:
+                    # SageAttention is handled at runtime through offload.shared_state
+                    attn_config = {"_attn_implementation": "eager"}  # Use eager for sage override
+                    logger.info(f"Will use {args.attention} for Llama model at runtime")
                 else:
-                    # Default to SDPA (Scale Dot Product Attention)
+                    # Default to SDPA (Scale Dot Product Attention) 
                     attn_config = {"_attn_implementation": "sdpa"}
                     logger.info("Using SDPA for Llama model")
                 
