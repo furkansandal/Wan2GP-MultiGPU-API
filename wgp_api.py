@@ -23,6 +23,7 @@ import numpy as np
 import argparse
 import random
 import cv2
+import json
 
 # FastAPI imports
 from fastapi import FastAPI, HTTPException
@@ -52,61 +53,45 @@ logger = logging.getLogger(__name__)
 
 
 class LTXV(BaseLTXV):
-    """Wrapper class for LTXV that adds missing attributes for pipeline compatibility"""
+    """Wrapper class for LTXV that ensures compatibility"""
     
-    def __init__(self, model_filepath, *args, **kwargs):
-        # Store original filepath for later use
-        self._original_model_filepath = model_filepath.copy() if isinstance(model_filepath, list) else [model_filepath]
-        
-        # CRITICAL FIX: Don't let base LTXV filter out LoRA files
-        # Instead, we'll handle LoRA files separately
-        
-        # First, let's check what files we have
-        logger.info(f"Model files provided: {model_filepath}")
-        
-        # Separate LoRA files from base model files
-        lora_files = [f for f in model_filepath if "lora" in f]
-        base_files = [f for f in model_filepath if "lora" not in f]
-        
-        # If we only have LoRA files and no base model, we need to find the base model
-        if lora_files and not base_files:
-            # For distilled LoRA, wgp.py uses the dev model as base (line 1671-1672 in wgp.py)
-            # First try the dev model (which is what wgp.py uses as dependency)
-            dev_model_path = "ckpts/ltxv_0.9.7_13B_dev_bf16.safetensors"
-            dev_quanto_model_path = "ckpts/ltxv_0.9.7_13B_dev_quanto_bf16_int8.safetensors"
-            
-            if os.path.exists(dev_model_path):
-                base_files = [dev_model_path]
-                logger.info(f"Using dev model as base (like wgp.py): {dev_model_path}")
-            elif os.path.exists(dev_quanto_model_path):
-                base_files = [dev_quanto_model_path]
-                logger.info(f"Using quanto dev model as base: {dev_quanto_model_path}")
-            else:
-                # Try to find any base model in the ckpts directory
-                import glob
-                possible_base_models = glob.glob("ckpts/ltxv_0.9.7_13B_*.safetensors")
-                base_models = [f for f in possible_base_models if "lora" not in f]
-                if base_models:
-                    base_files = [base_models[0]]
-                    logger.info(f"Found base model: {base_files[0]}")
-                else:
-                    raise ValueError("No base model found. Please provide a base model file.")
-        
-        # Call parent init with base files only (it will filter out LoRA anyway)
-        super().__init__(base_files, *args, **kwargs)
+    def __init__(self, model_filepath, text_encoder_filepath, model_def, *args, **kwargs):
+        # Call parent init with all required parameters
+        super().__init__(model_filepath, text_encoder_filepath, model_def, *args, **kwargs)
         
         # Add interrupt flag for pipeline compatibility
         self._interrupt = False
-        
-        # Don't load LoRA here - it will be loaded after offload profile is created
-        # This is required for MMGP to properly manage LoRA memory
-        
-        # Fix distilled detection
-        self.distilled = any("lora" in name or "distilled" in name for name in self._original_model_filepath)
     
     def generate(self, *args, **kwargs):
         # Pass all parameters directly to the base class
         return super().generate(*args, **kwargs)
+
+
+# Model definitions - matching wgp.py structure
+def get_model_def(model_type):
+    """Get model definition from JSON files"""
+    model_def_path = f"defaults/{model_type}.json"
+    
+    if not os.path.exists(model_def_path):
+        # Try finetunes folder
+        model_def_path = f"finetunes/{model_type}.json"
+    
+    if not os.path.exists(model_def_path):
+        raise ValueError(f"Model definition not found for {model_type}")
+    
+    with open(model_def_path, "r", encoding="utf-8") as f:
+        json_def = json.load(f)
+    
+    model_def = json_def["model"]
+    model_def["path"] = model_def_path
+    
+    # Handle settings
+    del json_def["model"]
+    settings = json_def
+    model_def["settings"] = settings
+    
+    return model_def
+
 
 # Constants
 MAX_FRAMES = 129  # User requested 129 frames
@@ -139,43 +124,31 @@ worker_task = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manage application lifecycle"""
-    global worker_task
-    
-    # Startup
+    """Application lifespan handler"""
     logger.info("Starting WGP API server...")
+    
+    # Start model loading
+    logger.info("Starting model loading...")
     load_model()
     
-    # Start background worker
+    # Start video generation worker
+    global worker_task
     worker_task = asyncio.create_task(video_generation_worker())
     logger.info("Video generation worker started")
     
     logger.info("API server ready!")
-    
     yield
     
-    # Shutdown
-    logger.info("Shutting down API server...")
-    
-    # Cancel worker task
+    # Cleanup
+    logger.info("Shutting down...")
     if worker_task:
         worker_task.cancel()
-        try:
-            await worker_task
-        except asyncio.CancelledError:
-            pass
-    
-    # Cleanup model
-    if model:
-        del model
-        torch.cuda.empty_cache()
-        gc.collect()
 
 
-# FastAPI app
+# Create FastAPI app
 app = FastAPI(
-    title="WGP LTX Video API",
-    description="API for LTX Video 0.9.7 Distilled 13B inference",
+    title="WGP API - LTX Video Generation",
+    description="API for LTX Video 0.9.7 Distilled 13B model",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -190,38 +163,25 @@ app.add_middleware(
 )
 
 
+# Pydantic models
 class VideoGenerationRequest(BaseModel):
-    """Request model for video generation"""
     prompt: str = Field(..., description="Text prompt for video generation")
-    image_url: str = Field(..., description="URL of the input image")
-    aspect_ratio: str = Field(default="16:9", description="Aspect ratio (9:16, 16:9, 1:1, 3:4, 4:3)")
-    negative_prompt: Optional[str] = Field(default=DEFAULT_NEGATIVE_PROMPT, description="Negative prompt")
-    seed: int = Field(default=-1, description="Random seed (-1 for random)")
-    enhance_prompt_with_llm: bool = Field(default=True, description="Enhance prompt using LLM")
-    
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "prompt": "A serene landscape with mountains",
-                "image_url": "https://example.com/image.jpg",
-                "aspect_ratio": "16:9",
-                "seed": -1
-            }
-        }
+    negative_prompt: str = Field(DEFAULT_NEGATIVE_PROMPT, description="Negative prompt")
+    image_url: str = Field(..., description="URL of the image to animate")
+    aspect_ratio: str = Field("16:9", description="Aspect ratio (9:16, 16:9, 1:1, 3:4, 4:3)")
+    seed: int = Field(-1, description="Random seed (-1 for random)")
+    enhance_prompt_with_llm: bool = Field(True, description="Whether to enhance prompt with LLM")
 
 
 class VideoGenerationResponse(BaseModel):
-    """Response model for video generation"""
     task_id: str
-    status: str
-    message: Optional[str] = None
-    queue_position: Optional[int] = None
+    status: str = "pending"
+    message: str = "Task queued for processing"
 
 
 class TaskStatusResponse(BaseModel):
-    """Response model for task status check"""
     task_id: str
-    status: str  # pending, processing, completed, failed
+    status: str
     video_url: Optional[str] = None
     error: Optional[str] = None
     processing_time: Optional[float] = None
@@ -231,7 +191,6 @@ class TaskStatusResponse(BaseModel):
 
 
 class TaskInfo:
-    """Internal task information"""
     def __init__(self, task_id: str, request: VideoGenerationRequest):
         self.task_id = task_id
         self.request = request
@@ -242,6 +201,74 @@ class TaskInfo:
         self.created_at = datetime.now()
         self.updated_at = datetime.now()
         self.temp_dir = None
+
+
+# Argument parser
+parser = argparse.ArgumentParser(description='WGP API Server')
+parser.add_argument('--host', type=str, default='0.0.0.0', help='Host to bind to')
+parser.add_argument('--port', type=int, default=8000, help='Port to bind to')
+parser.add_argument('--gpu', type=str, default='cuda:0', help='GPU device to use')
+parser.add_argument('--profile', type=int, default=1, help='Offload profile (0-5)')
+parser.add_argument('--quantization', type=str, default='int8', help='Model quantization')
+parser.add_argument('--fp16', action='store_true', help='Use fp16 precision')
+parser.add_argument('--bf16', action='store_true', help='Use bf16 precision')
+parser.add_argument('--vae-config', type=str, default='0', help='VAE configuration')
+parser.add_argument('--attention', type=str, default='xformers', help='Attention mode')
+parser.add_argument('--model', type=str, default='ltxv_13B', help='Model type to use')
+parser.add_argument('--distilled', action='store_true', help='Use distilled model')
+
+args = parser.parse_args()
+
+# Update model type based on distilled flag
+if args.distilled:
+    args.model = 'ltxv_distilled'
+
+# Global configuration
+device = torch.device(args.gpu if torch.cuda.is_available() else 'cpu')
+profile = args.profile
+transformer_quantization = args.quantization
+text_encoder_quantization = args.quantization
+attention_mode = args.attention
+
+
+def get_transformer_dtype():
+    """Get transformer dtype based on arguments"""
+    if args.fp16:
+        return torch.float16
+    return torch.bfloat16
+
+
+def get_model_filename(model_type, quantization='', dtype_policy=''):
+    """Get model filename based on type and quantization"""
+    # Get model definition
+    model_def = get_model_def(model_type)
+    
+    # For ltxv_distilled, we need to get the base model
+    if model_def.get("URLs") == "ltxv_13B":
+        # Get base model definition
+        base_model_def = get_model_def("ltxv_13B")
+        urls = base_model_def.get("URLs", [])
+    else:
+        urls = model_def.get("URLs", [])
+    
+    if not urls:
+        raise ValueError(f"No URLs found for model {model_type}")
+    
+    # Select appropriate URL based on quantization
+    if quantization == "int8" and len(urls) > 1:
+        # Use quantized version if available
+        return urls[1]
+    else:
+        # Use base version
+        return urls[0]
+
+
+def get_ltxv_text_encoder_filename(quantization):
+    """Get text encoder filename based on quantization"""
+    if quantization == "int8":
+        return "ckpts/T5_xxl_1.1/T5_xxl_1.1_enc_quanto_bf16_int8.safetensors"
+    else:
+        return "ckpts/T5_xxl_1.1/T5_xxl_1.1_enc_bf16.safetensors"
 
 
 def load_image_to_tensor_with_resize_and_crop(
@@ -286,211 +313,106 @@ def load_image_to_tensor_with_resize_and_crop(
     return frame_tensor.unsqueeze(0).unsqueeze(2)
 
 
-async def download_image(url: str) -> Image.Image:
-    """Download image from URL and return PIL Image"""
-    try:
-        logger.info(f"Downloading image from: {url}")
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        img = Image.open(BytesIO(response.content)).convert('RGB')
-        logger.info(f"Image downloaded successfully: {img.size}")
-        return img
-    except Exception as e:
-        logger.error(f"Error downloading image: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Failed to download image: {str(e)}")
-
-
-async def enhance_prompt(prompt: str, image: Image.Image) -> str:
-    """Enhance prompt using LLM based on both text and image"""
-    if not prompt_enhancer_llm_model or not prompt_enhancer_image_caption_model:
-        logger.warning("Prompt enhancement models not available")
-        return prompt
-    
-    try:
-        enhanced_prompt = prompt
-        
-        # First, get image caption using Florence 2
-        if prompt_enhancer_image_caption_model and prompt_enhancer_image_caption_processor:
-            logger.info("Generating image caption...")
-            inputs = prompt_enhancer_image_caption_processor(
-                text="<MORE_DETAILED_CAPTION>", 
-                images=image, 
-                return_tensors="pt"
-            )
-            # Move inputs to device and ensure correct dtype
-            inputs = {k: v.to(device, dtype=torch.bfloat16) if torch.is_tensor(v) and v.dtype.is_floating_point else v.to(device) if torch.is_tensor(v) else v 
-                     for k, v in inputs.items()}
-            
-            with torch.no_grad():
-                generated_ids = prompt_enhancer_image_caption_model.generate(
-                    input_ids=inputs["input_ids"],
-                    pixel_values=inputs["pixel_values"],
-                    max_new_tokens=1024,
-                    num_beams=3
-                )
-            
-            generated_text = prompt_enhancer_image_caption_processor.batch_decode(
-                generated_ids, 
-                skip_special_tokens=False
-            )[0]
-            
-            # Extract caption
-            parsed_answer = prompt_enhancer_image_caption_processor.post_process_generation(
-                generated_text,
-                task="<MORE_DETAILED_CAPTION>",
-                image_size=(image.width, image.height)
-            )
-            image_caption = parsed_answer.get('<MORE_DETAILED_CAPTION>', '')
-            logger.info(f"Generated image caption: {image_caption}")
-        
-        # Then enhance with Llama 3.2
-        if prompt_enhancer_llm_model and prompt_enhancer_llm_tokenizer:
-            logger.info("Enhancing prompt with LLM...")
-            
-            # Construct the enhancement prompt
-            system_prompt = """You are a creative assistant that enhances video generation prompts. 
-Given a user prompt and an image description, create a detailed, vivid prompt that will generate a compelling video.
-Keep the enhanced prompt concise but descriptive, focusing on movement, atmosphere, and visual details."""
-            
-            enhancement_prompt = f"""System: {system_prompt}
-
-Image Description: {image_caption}
-User Prompt: {prompt}
-
-Enhanced Prompt:"""
-            
-            inputs = prompt_enhancer_llm_tokenizer(
-                enhancement_prompt, 
-                return_tensors="pt"
-            ).to(device)
-            
-            with torch.no_grad():
-                outputs = prompt_enhancer_llm_model.generate(
-                    **inputs,
-                    max_new_tokens=150,
-                    temperature=0.7,
-                    do_sample=True,
-                    top_p=0.9
-                )
-            
-            enhanced_prompt = prompt_enhancer_llm_tokenizer.decode(
-                outputs[0][inputs['input_ids'].shape[1]:], 
-                skip_special_tokens=True
-            ).strip()
-            
-            logger.info(f"Enhanced prompt: {enhanced_prompt}")
-        
-        return enhanced_prompt if enhanced_prompt else prompt
-        
-    except Exception as e:
-        logger.error(f"Error enhancing prompt: {str(e)}")
-        return prompt
-
-
 def load_model():
-    """Load LTX Video model with specified configurations"""
-    global model, device, offloadobj, prompt_enhancer_image_caption_model, prompt_enhancer_image_caption_processor
+    """Load the LTX Video model and supporting models"""
+    global model, device, offloadobj, transformer_quantization
+    global prompt_enhancer_image_caption_model, prompt_enhancer_image_caption_processor
     global prompt_enhancer_llm_model, prompt_enhancer_llm_tokenizer
     
-    logger.info("Starting model loading...")
-    
-    # Set deterministic behavior for reproducible results
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    # Enable fully deterministic operations
-    torch.use_deterministic_algorithms(True)
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-    logger.info("Set CUDA deterministic mode for reproducible results")
-    
-    # Set attention mode to xformers
-    available_modes = get_supported_attention_modes()
-    logger.info(f"Available attention modes: {available_modes}")
-    if 'xformers' in available_modes:
-        # Set attention mode using offload shared state
-        offload.shared_state["_attention"] = 'xformers'
-        logger.info("Set attention mode to xformers")
-    else:
-        # Use auto mode as fallback
-        offload.shared_state["_attention"] = 'auto'
-        logger.warning("xformers not available, using auto attention mode")
-    
-    # Determine device
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-        logger.info(f"Using GPU: {torch.cuda.get_device_name()}")
-        logger.info(f"VRAM available: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
-    else:
-        device = torch.device("cpu")
-        logger.warning("CUDA not available, using CPU (will be slow)")
-    
     try:
-        # Model paths
-        force_distilled = os.environ.get("FORCE_DISTILLED", "0") == "1"
+        # Set CUDA settings for reproducibility
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        logger.info("Set CUDA deterministic mode for reproducible results")
         
-        if force_distilled:
-            # Prioritize distilled models when --distilled is used
-            model_files = [
-                "ckpts/ltxv_0.9.7_13B_distilled_lora128_bf16.safetensors",  # Distilled LoRA model (preferred)
-                "ckpts/ltxv_0.9.7_13B_distilled_bf16.safetensors",  # Distilled model
-                "ckpts/ltxv_0.9.7_13B_dev_quanto_bf16_int8.safetensors",  # Dev model (fallback)
-            ]
-            logger.info("Distilled model mode enabled via --distilled flag")
+        # Set attention mode
+        from wan.modules.attention import set_attention_mode
+        supported_modes = get_supported_attention_modes()
+        logger.info(f"Available attention modes: {supported_modes}")
+        
+        # Use shared state for xformers attention (matching wgp.py)
+        if attention_mode == "xformers":
+            offload.shared_state["_attention"] = 'xformers'
+            logger.info("Set attention mode to xformers")
         else:
-            # Default order
-            model_files = [
-                "ckpts/ltxv_0.9.7_13B_dev_quanto_bf16_int8.safetensors",  # Dev model
-                "ckpts/ltxv_0.9.7_13B_distilled_bf16.safetensors",  # Distilled model
-                "ckpts/ltxv_0.9.7_13B_distilled_lora128_bf16.safetensors"  # Distilled LoRA model
-            ]
+            set_attention_mode(attention_mode)
+            logger.info(f"Set attention mode to {attention_mode}")
         
-        text_encoder_files = [
-            "ckpts/T5_xxl_1.1/T5_xxl_1.1_enc_bf16.safetensors",
-            "ckpts/T5_xxl_1.1/T5_xxl_1.1_enc_quanto_bf16_int8.safetensors"
-        ]
+        # Log GPU info
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            logger.info(f"Using GPU: {gpu_name}")
+            logger.info(f"VRAM available: {vram_gb:.1f} GB")
         
-        # Check which model files exist
-        model_filepath = None
-        for file in model_files:
-            if os.path.exists(file):
-                model_filepath = file  # Not a list, just the filepath
-                logger.info(f"Found model file: {file}")
-                break
+        # Get model definition
+        model_type = args.model
+        logger.info(f"Loading model type: {model_type}")
         
-        if not model_filepath:
-            logger.error(f"No model files found. Checked: {model_files}")
-            raise FileNotFoundError("Model files not found")
+        model_def = get_model_def(model_type)
         
-        # Check text encoder
-        text_encoder_filepath = None
-        for file in text_encoder_files:
-            if os.path.exists(file):
-                text_encoder_filepath = file
-                logger.info(f"Found text encoder file: {file}")
-                break
+        # Get model filepath
+        base_model_filename = get_model_filename(model_type, transformer_quantization)
         
-        if not text_encoder_filepath:
-            logger.error(f"No text encoder files found. Checked: {text_encoder_files}")
-            raise FileNotFoundError("Text encoder files not found")
+        # Handle file paths
+        if base_model_filename.startswith("http"):
+            # For URLs, use just the filename
+            model_filepath = os.path.join("ckpts", os.path.basename(base_model_filename))
+        else:
+            model_filepath = base_model_filename
         
-        # Initialize model with BF16 precision
+        logger.info(f"Using model file: {model_filepath}")
+        
+        # Get LoRA files if defined
+        lora_files = model_def.get("loras", [])
+        if lora_files:
+            # Download/locate LoRA files
+            lora_filepaths = []
+            for lora_url in lora_files:
+                if lora_url.startswith("http"):
+                    lora_path = os.path.join("ckpts", os.path.basename(lora_url))
+                else:
+                    lora_path = lora_url
+                lora_filepaths.append(lora_path)
+            logger.info(f"Found LoRA files: {lora_filepaths}")
+        else:
+            lora_filepaths = []
+        
+        # Check if files exist
+        if not os.path.exists(model_filepath):
+            raise FileNotFoundError(f"Model file not found: {model_filepath}")
+        
+        for lora_path in lora_filepaths:
+            if not os.path.exists(lora_path):
+                raise FileNotFoundError(f"LoRA file not found: {lora_path}")
+        
+        # Get text encoder file
+        text_encoder_filepath = get_ltxv_text_encoder_filename(text_encoder_quantization)
+        
+        if not os.path.exists(text_encoder_filepath):
+            raise FileNotFoundError(f"Text encoder file not found: {text_encoder_filepath}")
+        
+        logger.info(f"Found text encoder file: {text_encoder_filepath}")
+        
+        # Initialize LTXV model with model_def
         logger.info("Initializing LTXV model...")
-        # LTXV expects model_filepath as a list
         model = LTXV(
-            model_filepath=[model_filepath],  # Convert to list
+            model_filepath=[model_filepath],  # Pass as list
             text_encoder_filepath=text_encoder_filepath,
+            model_def=model_def,  # Pass model definition
             dtype=torch.bfloat16,
             VAE_dtype=torch.float32,  # Match wgp.py - use float32 for VAE
             mixed_precision_transformer=False  # Match wgp.py default
         )
         
-        # Log whether model is distilled
-        logger.info(f"Model loaded. Distilled: {model.distilled}")
-        
-        # Store LoRA filepath for later loading (after offload profile)
-        lora_filepath = None
-        if model_filepath and "lora" in model_filepath:
-            logger.info(f"Detected LoRA model: {model_filepath}")
-            lora_filepath = model_filepath
+        # Get pipeline components
+        pipeline = model.pipeline
+        pipe = {
+            "transformer": pipeline.video_pipeline.transformer,
+            "vae": pipeline.vae,
+            "text_encoder": pipeline.video_pipeline.text_encoder,
+            "latent_upsampler": pipeline.latent_upsampler
+        }
         
         # Load prompt enhancement models
         logger.info("Loading prompt enhancement models...")
@@ -511,7 +433,7 @@ def load_model():
             else:
                 logger.warning("Florence2 model not found, prompt enhancement disabled")
             
-            # Llama 3.2 for text enhancement
+            # Llama 3.2 for prompt enhancement
             if os.path.exists("ckpts/Llama3_2/Llama3_2_quanto_bf16_int8.safetensors"):
                 prompt_enhancer_llm_model = offload.fast_load_transformers_model(
                     "ckpts/Llama3_2/Llama3_2_quanto_bf16_int8.safetensors"
@@ -519,43 +441,23 @@ def load_model():
                 prompt_enhancer_llm_tokenizer = AutoTokenizer.from_pretrained("ckpts/Llama3_2")
                 logger.info("Loaded Llama 3.2 for prompt enhancement")
             else:
-                logger.warning("Llama 3.2 model not found, LLM enhancement disabled")
-            
-            # Assign enhancement models to LTXV instance
-            if hasattr(model.pipeline, 'video_pipeline'):
-                model.pipeline.video_pipeline.prompt_enhancer_image_caption_model = prompt_enhancer_image_caption_model
-                model.pipeline.video_pipeline.prompt_enhancer_image_caption_processor = prompt_enhancer_image_caption_processor
-                model.pipeline.video_pipeline.prompt_enhancer_llm_model = prompt_enhancer_llm_model
-                model.pipeline.video_pipeline.prompt_enhancer_llm_tokenizer = prompt_enhancer_llm_tokenizer
-                logger.info("Assigned prompt enhancement models to pipeline")
+                logger.warning("Llama3_2 model not found, LLM enhancement disabled")
                 
         except Exception as e:
             logger.warning(f"Failed to load prompt enhancement models: {e}")
         
-        # Configure offload settings for H100 80GB
-        if hasattr(offload, 'set_max_vram_budget'):
-            offload.set_max_vram_budget(40000)  # 40GB as specified
-            logger.info("Set VRAM budget to 40GB")
-        
-        # Set up offload profile for HighRAM_HighVRAM (profile 1)
-        # Based on wgp.py pattern, profile is set using offload.profile() function
-        # Profile 1 = HighRAM_HighVRAM: at least 48 GB of RAM and 24 GB of VRAM
-        profile = 1
-        
-        # Create pipe dictionary based on wgp.py pattern for LTXV
-        pipeline = model.pipeline
-        pipe = {
-            "transformer": pipeline.video_pipeline.transformer,
-            "vae": pipeline.vae,
-            "text_encoder": pipeline.video_pipeline.text_encoder,
-            "latent_upsampler": pipeline.latent_upsampler
-        }
-        
         # Add prompt enhancement models to pipe if loaded
         if prompt_enhancer_image_caption_model:
             pipe["prompt_enhancer_image_caption_model"] = prompt_enhancer_image_caption_model
+            # Assign to pipeline for use in generation
+            model.pipeline.video_pipeline.prompt_enhancer_image_caption_model = prompt_enhancer_image_caption_model
+            model.pipeline.video_pipeline.prompt_enhancer_image_caption_processor = prompt_enhancer_image_caption_processor
         if prompt_enhancer_llm_model:
             pipe["prompt_enhancer_llm_model"] = prompt_enhancer_llm_model
+            model.pipeline.video_pipeline.prompt_enhancer_llm_model = prompt_enhancer_llm_model
+            model.pipeline.video_pipeline.prompt_enhancer_llm_tokenizer = prompt_enhancer_llm_tokenizer
+        
+        logger.info("Assigned prompt enhancement models to pipeline")
         
         # Profile configuration based on wgp.py
         kwargs = {}
@@ -574,7 +476,7 @@ def load_model():
                 profile_no=profile, 
                 compile="", 
                 quantizeTransformer=False, 
-                loras="transformer", 
+                loras="transformer",  # Enable LoRA support
                 coTenantsMap={}, 
                 perc_reserved_mem_max=0.3,  # Default from wgp.py
                 convertWeightsFloatTo=torch.bfloat16,
@@ -583,12 +485,14 @@ def load_model():
             logger.info(f"Set offload profile to HighRAM_HighVRAM (profile {profile})")
             
             # Now load LoRA if we have one (after offload profile is set)
-            if lora_filepath:
+            if lora_filepaths:
                 try:
-                    logger.info(f"Loading LoRA weights from: {lora_filepath}")
+                    logger.info(f"Loading LoRA weights from: {lora_filepaths}")
+                    lora_multipliers = model_def.get("loras_multipliers", [1.0] * len(lora_filepaths))
                     offload.load_loras_into_model(
                         pipe["transformer"],
-                        [lora_filepath],
+                        lora_filepaths,
+                        lora_multipliers,
                         activate_all_loras=True
                     )
                     logger.info(f"LoRA weights applied successfully")
@@ -608,133 +512,249 @@ def load_model():
 
 async def video_generation_worker():
     """Background worker for processing video generation tasks"""
-    global generation_tasks
-    
     while True:
         try:
             # Get task from queue
             task_id = await task_queue.get()
+            
+            if task_id is None:
+                break
+                
             task_info = generation_tasks.get(task_id)
-            
             if not task_info:
-                logger.error(f"Task {task_id} not found in generation_tasks")
                 continue
-            
-            # Update status to processing
+                
+            # Update status
             task_info.status = "processing"
             task_info.updated_at = datetime.now()
-            logger.info(f"Starting processing for task {task_id}")
             
+            # Process the task
             try:
-                # Download image
-                input_image = await download_image(task_info.request.image_url)
-                
-                # Get resolution
-                width, height = SUPPORTED_RESOLUTIONS[task_info.request.aspect_ratio]
-                
-                # Process image with same method as ltxv.py
-                # This is crucial for maintaining quality throughout the video
-                processed_image_tensor = load_image_to_tensor_with_resize_and_crop(
-                    input_image, 
-                    target_height=height, 
-                    target_width=width,
-                    just_crop=False
-                )
-                # Convert back to PIL for model.generate (it will process again internally)
-                # For now, keep using the original image until we implement conditioning_items
-                
-                # Handle seed
-                print(f"Pre defined seed: {task_info.request.seed}")
-                seed = task_info.request.seed if task_info.request.seed != -1 else int(random.randint(0, 999999999))
-                print(f"New seed: {seed}")
-                # Enhance prompt if requested
-                prompt_to_use = task_info.request.prompt
-                if task_info.request.enhance_prompt_with_llm:
-                    prompt_to_use = await enhance_prompt(task_info.request.prompt, input_image)
-                
-                # Prepare generation parameters - matching wgp.py exactly
-                generation_params = {
-                    "input_prompt": prompt_to_use,
-                    "n_prompt": task_info.request.negative_prompt,
-                    "image_start": input_image,
-                    "image_end": None,
-                    "input_video": None,  # wgp.py uses pre_video_guide here for LTXV
-                    "denoising_strength": 1.0,  # wgp.py uses this for LTXV
-                    "sampling_steps": 50,
-                    "image_cond_noise_scale": 0.0,  # Pipeline default, not ltxv.py default
-                    "seed": seed,
-                    "strength": 1.0,  # Image conditioning strength
-                    "height": height,
-                    "width": width,
-                    "frame_num": MAX_FRAMES,
-                    "frame_rate": 30,
-                    "fit_into_canvas": True,
-                    "device": str(device),
-                    "VAE_tile_size": (0, 0),
-                }
+                logger.info(f"Starting processing for task {task_id}")
                 
                 # Generate video
-                start_time = time.time()
-                async with model_lock:
-                    logger.info(f"Generating video for task {task_id}...")
-                    logger.info(f"Generation params: resolution={width}x{height}, frames={MAX_FRAMES}, seed={seed}")
-                    loop = asyncio.get_event_loop()
-                    try:
-                        video_tensor = await loop.run_in_executor(
-                            None,
-                            lambda: model.generate(**generation_params)
-                        )
-                    except Exception as e:
-                        logger.error(f"Error in model.generate: {str(e)}")
-                        logger.error(f"Error type: {type(e).__name__}")
-                        import traceback
-                        logger.error(f"Traceback: {traceback.format_exc()}")
-                        raise
+                await generate_video_for_task(task_id, task_info)
                 
-                if video_tensor is None:
-                    raise Exception("Video generation failed - model returned None")
-                
-                # Save video
-                temp_dir = tempfile.mkdtemp()
-                output_path = os.path.join(temp_dir, "video.mp4")
-                save_video_tensor(video_tensor, output_path, fps=30)
-                
-                # Update task info
-                task_info.temp_dir = temp_dir
-                task_info.video_url = f"/download/{task_id}"
+                # Update status
                 task_info.status = "completed"
-                task_info.processing_time = time.time() - start_time
-                task_info.updated_at = datetime.now()
-                
-                logger.info(f"Task {task_id} completed in {task_info.processing_time:.2f}s")
-                
-                # Schedule cleanup
-                asyncio.create_task(cleanup_task(task_id))
                 
             except Exception as e:
                 logger.error(f"Error processing task {task_id}: {str(e)}")
                 task_info.status = "failed"
                 task_info.error = str(e)
-                task_info.updated_at = datetime.now()
                 
-                # Schedule cleanup for failed tasks too
-                asyncio.create_task(cleanup_task(task_id))
-                
+            task_info.updated_at = datetime.now()
+            
+        except asyncio.CancelledError:
+            break
         except Exception as e:
-            logger.error(f"Worker error: {str(e)}")
-            await asyncio.sleep(1)
+            logger.error(f"Error in video generation worker: {str(e)}")
 
 
+async def generate_video_for_task(task_id: str, task_info: TaskInfo):
+    """Generate video for a specific task"""
+    try:
+        start_time = time.time()
+        
+        # Download image
+        input_image = await download_image(task_info.request.image_url)
+        
+        # Get resolution
+        width, height = SUPPORTED_RESOLUTIONS[task_info.request.aspect_ratio]
+        
+        # Process image with same method as ltxv.py
+        # This is crucial for maintaining quality throughout the video
+        processed_image_tensor = load_image_to_tensor_with_resize_and_crop(
+            input_image, 
+            target_height=height, 
+            target_width=width,
+            just_crop=False
+        )
+        # Convert back to PIL for model.generate (it will process again internally)
+        # For now, keep using the original image until we implement conditioning_items
+        
+        # Handle seed
+        print(f"Pre defined seed: {task_info.request.seed}")
+        seed = task_info.request.seed if task_info.request.seed != -1 else int(random.randint(0, 999999999))
+        print(f"New seed: {seed}")
+        
+        # Enhance prompt if requested
+        prompt_to_use = task_info.request.prompt
+        if task_info.request.enhance_prompt_with_llm:
+            prompt_to_use = await enhance_prompt(task_info.request.prompt, input_image)
+        
+        # Prepare generation parameters - matching wgp.py exactly
+        generation_params = {
+            "input_prompt": prompt_to_use,
+            "n_prompt": task_info.request.negative_prompt,
+            "image_start": input_image,
+            "image_end": None,
+            "input_video": None,  # wgp.py uses pre_video_guide here for LTXV
+            "denoising_strength": 1.0,  # wgp.py uses this for LTXV
+            "sampling_steps": 50,
+            "image_cond_noise_scale": 0.0,  # Pipeline default, not ltxv.py default
+            "seed": seed,
+            "strength": 1.0,  # Image conditioning strength
+            "height": height,
+            "width": width,
+            "frame_num": MAX_FRAMES,
+            "frame_rate": 30,
+            "fit_into_canvas": True,
+            "device": str(device),
+            "VAE_tile_size": (0, 0),
+        }
+        
+        # Generate video
+        start_time = time.time()
+        async with model_lock:
+            logger.info(f"Generating video for task {task_id}...")
+            logger.info(f"Generation params: resolution={width}x{height}, frames={MAX_FRAMES}, seed={seed}")
+            loop = asyncio.get_event_loop()
+            try:
+                video_tensor = await loop.run_in_executor(
+                    None,
+                    lambda: model.generate(**generation_params)
+                )
+            except Exception as e:
+                logger.error(f"Error in model.generate: {str(e)}")
+                logger.error(f"Error type: {type(e).__name__}")
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
+                raise
+        
+        if video_tensor is None:
+            raise Exception("Video generation failed - model returned None")
+        
+        # Save video
+        temp_dir = tempfile.mkdtemp()
+        output_path = os.path.join(temp_dir, "video.mp4")
+        save_video_tensor(video_tensor, output_path)
+        
+        # Update task info
+        task_info.temp_dir = temp_dir
+        task_info.video_url = f"/download/{task_id}"
+        task_info.processing_time = time.time() - start_time
+        
+        logger.info(f"Task {task_id} completed in {task_info.processing_time:.2f}s")
+        
+    except Exception as e:
+        logger.error(f"Error generating video: {str(e)}")
+        raise
 
 
+async def download_image(url: str) -> Image.Image:
+    """Download image from URL"""
+    logger.info(f"Downloading image from: {url}")
+    response = requests.get(url)
+    response.raise_for_status()
+    image = Image.open(BytesIO(response.content)).convert("RGB")
+    logger.info(f"Image downloaded successfully: {image.size}")
+    return image
+
+
+async def enhance_prompt(prompt: str, image: Image.Image) -> str:
+    """Enhance prompt using image captioning and LLM"""
+    try:
+        # Generate image caption
+        if prompt_enhancer_image_caption_model and prompt_enhancer_image_caption_processor:
+            logger.info("Generating image caption...")
+            
+            # Prepare image for Florence
+            inputs = prompt_enhancer_image_caption_processor(
+                text="<MORE_DETAILED_CAPTION>", 
+                images=image, 
+                return_tensors="pt"
+            ).to(device)
+            
+            # Generate caption
+            with torch.no_grad():
+                generated_ids = prompt_enhancer_image_caption_model.generate(
+                    **inputs,
+                    max_new_tokens=1024,
+                    early_stopping=False,
+                    do_sample=False,
+                    num_beams=3,
+                )
+            
+            # Decode caption
+            generated_text = prompt_enhancer_image_caption_processor.batch_decode(
+                generated_ids, 
+                skip_special_tokens=False
+            )[0]
+            
+            # Parse Florence output
+            parsed_answer = prompt_enhancer_image_caption_processor.post_process_generation(
+                generated_text,
+                task="<MORE_DETAILED_CAPTION>",
+                image_size=image.size
+            )
+            
+            image_caption = parsed_answer["<MORE_DETAILED_CAPTION>"]
+            logger.info(f"Generated image caption: {image_caption}")
+        else:
+            image_caption = ""
+        
+        # Enhance with LLM
+        if prompt_enhancer_llm_model and prompt_enhancer_llm_tokenizer and image_caption:
+            logger.info("Enhancing prompt with LLM...")
+            
+            # Prepare prompt for Llama
+            system_prompt = """You are a creative assistant that enhances video generation prompts. 
+Your task is to take a simple prompt and an image description, then create a detailed, vivid prompt that will generate high-quality videos.
+Focus on movement, atmosphere, lighting, and cinematic qualities. Keep the output under 150 words."""
+            
+            llm_input = f"""Image description: {image_caption}
+User prompt: {prompt}
+
+Create an enhanced video generation prompt that brings this scene to life with movement and atmosphere:"""
+            
+            # Tokenize
+            inputs = prompt_enhancer_llm_tokenizer(
+                llm_input,
+                return_tensors="pt",
+                truncation=True,
+                max_length=512
+            ).to(device)
+            
+            # Generate
+            with torch.no_grad():
+                outputs = prompt_enhancer_llm_model.generate(
+                    **inputs,
+                    max_new_tokens=200,
+                    temperature=0.8,
+                    do_sample=True,
+                    top_p=0.9,
+                )
+            
+            # Decode
+            enhanced_prompt = prompt_enhancer_llm_tokenizer.decode(
+                outputs[0][inputs['input_ids'].shape[1]:], 
+                skip_special_tokens=True
+            ).strip()
+            
+            # Clean up the output
+            enhanced_prompt = enhanced_prompt.replace(llm_input, "").strip()
+            
+            logger.info(f"Enhanced prompt: {enhanced_prompt}")
+            return enhanced_prompt
+        
+        # If enhancement failed, return original prompt
+        return prompt
+        
+    except Exception as e:
+        logger.error(f"Error enhancing prompt: {e}")
+        return prompt
+
+
+# API Endpoints
 @app.get("/")
 async def root():
     """Root endpoint"""
     return {
-        "name": "WGP LTX Video API",
+        "service": "WGP API",
         "version": "1.0.0",
-        "model": "LTX Video 0.9.7 Distilled 13B",
-        "status": "running" if model is not None else "model not loaded"
+        "model": args.model,
+        "status": "running"
     }
 
 
@@ -742,47 +762,40 @@ async def root():
 async def health_check():
     """Health check endpoint"""
     return {
-        "status": "healthy" if model is not None else "unhealthy",
-        "gpu_available": torch.cuda.is_available(),
-        "gpu_name": torch.cuda.get_device_name() if torch.cuda.is_available() else None,
-        "model_loaded": model is not None
+        "status": "healthy",
+        "model_loaded": model is not None,
+        "device": str(device),
+        "queue_size": task_queue.qsize()
     }
 
 
 @app.post("/generate", response_model=VideoGenerationResponse)
 async def generate_video(request: VideoGenerationRequest):
-    """Submit a video generation request"""
-    
-    if not model:
-        raise HTTPException(status_code=503, detail="Model not loaded")
+    """Queue a video generation task"""
     
     # Validate aspect ratio
     if request.aspect_ratio not in SUPPORTED_RESOLUTIONS:
         raise HTTPException(
             status_code=400, 
-            detail=f"Unsupported aspect ratio. Supported: {list(SUPPORTED_RESOLUTIONS.keys())}"
+            detail=f"Invalid aspect ratio. Supported: {list(SUPPORTED_RESOLUTIONS.keys())}"
         )
     
-    # Generate task ID
+    # Create task
     task_id = str(uuid.uuid4())
-    
-    # Create task info
     task_info = TaskInfo(task_id, request)
     generation_tasks[task_id] = task_info
     
-    # Add to queue
+    # Queue for processing
     await task_queue.put(task_id)
     
-    # Calculate queue position
-    queue_position = task_queue.qsize()
-    
-    logger.info(f"Task {task_id} added to queue at position {queue_position}")
+    # Log queue status
+    queue_size = task_queue.qsize()
+    logger.info(f"Task {task_id} added to queue at position {queue_size}")
     
     return VideoGenerationResponse(
         task_id=task_id,
         status="pending",
-        message="Task queued for processing",
-        queue_position=queue_position
+        message=f"Task queued for processing (position: {queue_size})"
     )
 
 
@@ -897,39 +910,44 @@ async def get_queue_status():
     }
 
 
-async def cleanup_task(task_id: str, delay: int = 600):
-    """Clean up task data and files after delay"""
-    await asyncio.sleep(delay)  # Wait 10 minutes
-    
-    task_info = generation_tasks.get(task_id)
-    if task_info and task_info.temp_dir:
+# Cleanup old tasks periodically
+async def cleanup_old_tasks():
+    """Clean up old completed tasks and their temporary files"""
+    while True:
         try:
-            shutil.rmtree(task_info.temp_dir)
-            logger.info(f"Cleaned up temporary directory for task {task_id}")
+            await asyncio.sleep(3600)  # Run every hour
+            
+            current_time = datetime.now()
+            tasks_to_remove = []
+            
+            for task_id, task_info in generation_tasks.items():
+                # Remove tasks older than 24 hours
+                if (current_time - task_info.created_at).total_seconds() > 86400:
+                    tasks_to_remove.append(task_id)
+                    
+                    # Clean up temp directory
+                    if task_info.temp_dir and os.path.exists(task_info.temp_dir):
+                        shutil.rmtree(task_info.temp_dir)
+            
+            # Remove old tasks
+            for task_id in tasks_to_remove:
+                del generation_tasks[task_id]
+                
+            if tasks_to_remove:
+                logger.info(f"Cleaned up {len(tasks_to_remove)} old tasks")
+                
         except Exception as e:
-            logger.warning(f"Failed to clean up {task_info.temp_dir}: {str(e)}")
-    
-    # Remove task from memory
-    generation_tasks.pop(task_id, None)
-    logger.info(f"Removed task {task_id} from memory")
+            logger.error(f"Error in cleanup task: {e}")
 
 
 if __name__ == "__main__":
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description="WGP LTX Video API Server")
-    parser.add_argument("--distilled", action="store_true", help="Force use of distilled model")
-    parser.add_argument("--port", type=int, default=8000, help="Port to run the server on")
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind the server to")
-    args = parser.parse_args()
+    # Start cleanup task
+    asyncio.create_task(cleanup_old_tasks())
     
-    # Store distilled preference globally
-    os.environ["FORCE_DISTILLED"] = "1" if args.distilled else "0"
-    
-    # Run the API server
+    # Run the server
     uvicorn.run(
-        "wgp_api:app",
+        app,
         host=args.host,
         port=args.port,
-        reload=False,
         log_level="info"
     )
