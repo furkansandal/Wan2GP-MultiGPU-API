@@ -443,8 +443,6 @@ def load_model():
                 prompt_enhancer_llm_model = offload.fast_load_transformers_model(
                     "ckpts/Llama3_2/Llama3_2_quanto_bf16_int8.safetensors"
                 )
-                # Move Llama model to device
-                prompt_enhancer_llm_model = prompt_enhancer_llm_model.to(device)
                 prompt_enhancer_llm_tokenizer = AutoTokenizer.from_pretrained("ckpts/Llama3_2")
                 logger.info("Loaded Llama 3.2 for prompt enhancement")
             else:
@@ -470,9 +468,13 @@ def load_model():
         kwargs = {}
         if profile in (2, 4, 5):
             preload = 40000  # 40GB preload
-            kwargs["budgets"] = {"transformer": 100 if preload == 0 else preload, 
-                               "text_encoder": 100 if preload == 0 else preload, 
-                               "*": max(1000 if profile == 5 else 3000, preload)}
+            budgets = {"transformer": 100 if preload == 0 else preload, 
+                      "text_encoder": 100 if preload == 0 else preload, 
+                      "*": max(1000 if profile == 5 else 3000, preload)}
+            # Add budget for Llama model if loaded
+            if prompt_enhancer_llm_model:
+                budgets["prompt_enhancer_llm_model"] = 5000  # Same as wgp.py
+            kwargs["budgets"] = budgets
         elif profile == 3:
             kwargs["budgets"] = {"*": "70%"}
         
@@ -682,7 +684,7 @@ async def enhance_prompt(prompt: str, image: Image.Image) -> str:
                 generated_ids = prompt_enhancer_image_caption_model.generate(
                     input_ids=inputs["input_ids"],
                     pixel_values=inputs["pixel_values"],
-                    max_new_tokens=1024,
+                    max_new_tokens=4096,
                     early_stopping=False,
                     do_sample=False,
                     num_beams=3,
@@ -725,7 +727,7 @@ Create an enhanced video generation prompt that brings this scene to life with m
             with torch.no_grad():
                 outputs = prompt_enhancer_llm_model.generate(
                     **inputs,
-                    max_new_tokens=200,
+                    max_new_tokens=4096,
                     temperature=0.8,
                     do_sample=True,
                     top_p=0.9,
