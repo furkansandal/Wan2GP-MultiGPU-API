@@ -664,9 +664,11 @@ async def download_image(url: str) -> Image.Image:
 async def enhance_prompt(prompt: str, image: Image.Image) -> str:
     """Enhance prompt using image captioning and LLM"""
     try:
+        enhance_start_time = time.time()
         # Generate image caption
         if prompt_enhancer_image_caption_model and prompt_enhancer_image_caption_processor:
             logger.info("Generating image caption...")
+            caption_start_time = time.time()
             
             # Prepare image for Florence
             inputs = prompt_enhancer_image_caption_processor(
@@ -697,13 +699,15 @@ async def enhance_prompt(prompt: str, image: Image.Image) -> str:
             )
             
             image_caption = image_captions[0] if image_captions else ""
-            logger.info(f"Generated image caption: {image_caption}")
+            caption_time = time.time() - caption_start_time
+            logger.info(f"Generated image caption in {caption_time:.2f}s: {image_caption}")
         else:
             image_caption = ""
         
         # Enhance with LLM
         if prompt_enhancer_llm_model and prompt_enhancer_llm_tokenizer and image_caption:
             logger.info("Enhancing prompt with LLM...")
+            llm_start_time = time.time()
             
             # Prepare prompt for Llama
             system_prompt = """You are a creative assistant that enhances video generation prompts. 
@@ -742,7 +746,9 @@ Create an enhanced video generation prompt that brings this scene to life with m
             # Clean up the output
             enhanced_prompt = enhanced_prompt.replace(llm_input, "").strip()
             
-            logger.info(f"Enhanced prompt: {enhanced_prompt}")
+            llm_time = time.time() - llm_start_time
+            total_enhance_time = time.time() - enhance_start_time
+            logger.info(f"Enhanced prompt in {llm_time:.2f}s (total: {total_enhance_time:.2f}s): {enhanced_prompt}")
             return enhanced_prompt
         
         # If enhancement failed, return original prompt
