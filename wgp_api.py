@@ -443,6 +443,8 @@ def load_model():
                 prompt_enhancer_llm_model = offload.fast_load_transformers_model(
                     "ckpts/Llama3_2/Llama3_2_quanto_bf16_int8.safetensors"
                 )
+                # Move Llama model to device
+                prompt_enhancer_llm_model = prompt_enhancer_llm_model.to(device)
                 prompt_enhancer_llm_tokenizer = AutoTokenizer.from_pretrained("ckpts/Llama3_2")
                 logger.info("Loaded Llama 3.2 for prompt enhancement")
             else:
