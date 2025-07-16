@@ -440,17 +440,28 @@ def load_model():
         
             # Llama 3.2 for prompt enhancement
             if os.path.exists("ckpts/Llama3_2/Llama3_2_quanto_bf16_int8.safetensors"):
-                # Load with attention optimization
-                try:
-                    prompt_enhancer_llm_model = offload.fast_load_transformers_model(
-                        "ckpts/Llama3_2/Llama3_2_quanto_bf16_int8.safetensors",
-                        configKwargs={"_attn_implementation": "flash_attention_2"}  # Try Flash Attention
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to load with Flash Attention: {e}, retrying without")
-                    prompt_enhancer_llm_model = offload.fast_load_transformers_model(
-                        "ckpts/Llama3_2/Llama3_2_quanto_bf16_int8.safetensors"
-                    )
+                # Load model with optimal attention implementation
+                # Try different attention mechanisms based on availability
+                attn_config = None
+                if args.attention == "xformers":
+                    try:
+                        from xformers.ops import memory_efficient_attention
+                        attn_config = {"_attn_implementation": "xformers"}
+                        logger.info("Using xformers for Llama model")
+                    except:
+                        logger.warning("xformers not available, falling back to default")
+                elif args.attention == "sage" or args.attention == "sage2":
+                    # SageAttention is handled differently, no config needed
+                    logger.info(f"Will use {args.attention} for Llama model")
+                else:
+                    # Default to SDPA (Scale Dot Product Attention)
+                    attn_config = {"_attn_implementation": "sdpa"}
+                    logger.info("Using SDPA for Llama model")
+                
+                prompt_enhancer_llm_model = offload.fast_load_transformers_model(
+                    "ckpts/Llama3_2/Llama3_2_quanto_bf16_int8.safetensors",
+                    configKwargs=attn_config if attn_config else {}
+                )
                 prompt_enhancer_llm_tokenizer = AutoTokenizer.from_pretrained("ckpts/Llama3_2")
                 logger.info("Loaded Llama 3.2 for prompt enhancement")
             else:
@@ -751,15 +762,26 @@ Create an enhanced video generation prompt that brings this scene to life with m
                 max_length=512
             ).to(device)
             
-            # Generate
+            # Generate with optimized settings
             with torch.no_grad():
+                # Check if we should use SageAttention
+                if args.attention in ["sage", "sage2"]:
+                    # Set SageAttention in offload shared state
+                    original_attention = offload.shared_state.get("_attention", "sdpa")
+                    offload.shared_state["_attention"] = args.attention
+                
                 outputs = prompt_enhancer_llm_model.generate(
                     **inputs,
                     max_new_tokens=100,  # Reduced from 200 for faster generation
                     temperature=0.8,
                     do_sample=True,
                     top_p=0.9,
+                    use_cache=True,  # Enable KV cache for faster generation
                 )
+                
+                # Restore original attention if changed
+                if args.attention in ["sage", "sage2"]:
+                    offload.shared_state["_attention"] = original_attention
             
             # Decode
             enhanced_prompt = prompt_enhancer_llm_tokenizer.decode(
