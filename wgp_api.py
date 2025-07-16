@@ -330,17 +330,12 @@ def load_model():
         logger.info("Set CUDA deterministic mode for reproducible results")
         
         # Set attention mode
-        from wan.modules.attention import set_attention_mode
         supported_modes = get_supported_attention_modes()
         logger.info(f"Available attention modes: {supported_modes}")
         
-        # Use shared state for xformers attention (matching wgp.py)
-        if attention_mode == "xformers":
-            offload.shared_state["_attention"] = 'xformers'
-            logger.info("Set attention mode to xformers")
-        else:
-            set_attention_mode(attention_mode)
-            logger.info(f"Set attention mode to {attention_mode}")
+        # Use shared state for attention (matching wgp.py)
+        offload.shared_state["_attention"] = attention_mode
+        logger.info(f"Set attention mode to {attention_mode}")
         
         # Log GPU info
         if torch.cuda.is_available():
