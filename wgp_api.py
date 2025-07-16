@@ -718,13 +718,28 @@ async def enhance_prompt(prompt: str, image: Image.Image) -> str:
             logger.info("Generating image caption...")
             caption_start_time = time.time()
             
-            # Prepare image for Florence - resize for speed
-            # Florence2 works well with smaller images
-            if image.width > 768 or image.height > 768:
-                image_for_caption = image.copy()
-                image_for_caption.thumbnail((768, 768), Image.Resampling.LANCZOS)
-            else:
-                image_for_caption = image
+            # Prepare image for Florence - resize to 480p equivalent while preserving aspect ratio
+            # Calculate target size based on 480p resolution
+            image_for_caption = image.copy()
+            width, height = image.width, image.height
+            aspect_ratio = width / height
+            
+            # Determine target dimensions based on aspect ratio
+            # 480p means 480 pixels on the shorter side
+            if width > height:  # Landscape
+                target_height = 480
+                target_width = int(480 * aspect_ratio)
+            else:  # Portrait or square
+                target_width = 480
+                target_height = int(480 / aspect_ratio)
+            
+            # Only resize if image is larger than target
+            if width > target_width or height > target_height:
+                image_for_caption = image_for_caption.resize(
+                    (target_width, target_height), 
+                    Image.Resampling.LANCZOS
+                )
+                logger.info(f"Resized image from {width}x{height} to {target_width}x{target_height} for captioning")
                 
             inputs = prompt_enhancer_image_caption_processor(
                 text="<DETAILED_CAPTION>", 
@@ -777,7 +792,7 @@ async def enhance_prompt(prompt: str, image: Image.Image) -> str:
             # Prepare prompt for Llama
             system_prompt = """You are a creative assistant that enhances video generation prompts. 
 Your task is to take a simple prompt and an image description, then create a detailed, vivid prompt that will generate high-quality videos.
-Focus on movement, atmosphere, lighting, and cinematic qualities. Keep the output under 150 words."""
+Focus on movement, atmosphere, lighting, and cinematic qualities. Keep the output under 150 words. Video is 5 seconds long."""
             
             llm_input = f"""Image description: {image_caption}
 User prompt: {prompt}
