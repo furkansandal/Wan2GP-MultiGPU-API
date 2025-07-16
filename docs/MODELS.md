@@ -2,6 +2,8 @@
 
 WanGP supports multiple video generation models, each optimized for different use cases and hardware configurations. 
 
+Most models can combined with Loras Accelerators (check the Lora guide) to accelerate the generation of a video x2 or x3 with little quality loss
+
 
 ## Wan 2.1 Text2Video Models
 Please note that that the term *Text2Video* refers to the underlying Wan architecture but as it has been greatly improved overtime many derived Text2Video models can now  generate videos using images.
@@ -65,6 +67,12 @@ Please note that that the term *Text2Video* refers to the underlying Wan archite
 
 ## Wan 2.1 Specialized Models
 
+#### Multitalk
+- **Type**: Multi Talking head animation
+- **Input**: Voice track + image
+- **Works on**: People
+- **Use case**: Lip-sync and voice-driven animation for up to two people
+
 #### FantasySpeaking
 - **Type**: Talking head animation
 - **Input**: Voice track + image
@@ -82,7 +90,7 @@ Please note that that the term *Text2Video* refers to the underlying Wan archite
 - **Requirements**: 81+ frame input videos, 15+ denoising steps
 - **Use case**: View same scene from different angles
 
-#### Sky Reels v2
+#### Sky Reels v2 Diffusion
 - **Type**: Diffusion Forcing model
 - **Specialty**: "Infinite length" videos
 - **Features**: High quality continuous generation
@@ -107,22 +115,6 @@ Please note that that the term *Text2Video* refers to the underlying Wan archite
 
 <BR>
 
-## Wan Special Loras
-### Safe-Forcing lightx2v Lora
-- **Type**: Distilled model (Lora implementation)
-- **Speed**: 4-8 steps generation, 2x faster (no classifier free guidance)
-- **Compatible**: Works with t2v and i2v Wan 14B models
-- **Setup**: Requires Safe-Forcing lightx2v Lora (see [LORAS.md](LORAS.md))
-
-
-### Causvid Lora
-- **Type**: Distilled model (Lora implementation)
-- **Speed**: 4-12 steps generation, 2x faster (no classifier free guidance)
-- **Compatible**: Works with Wan 14B models
-- **Setup**: Requires CausVid Lora (see [LORAS.md](LORAS.md))
-
-
-<BR>
 
 ## Hunyuan Video Models
 

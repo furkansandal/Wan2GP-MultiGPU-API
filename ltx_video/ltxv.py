@@ -149,6 +149,7 @@ class LTXV:
         self,
         model_filepath: str,
         text_encoder_filepath: str,
+        model_def,
         dtype = torch.bfloat16,
         VAE_dtype = torch.bfloat16, 
         mixed_precision_transformer = False
@@ -157,8 +158,8 @@ class LTXV:
         # if dtype == torch.float16:
         dtype  = torch.bfloat16
         self.mixed_precision_transformer = mixed_precision_transformer
-        self.distilled = any("lora" in name for name in model_filepath)
-        model_filepath = [name for name in model_filepath if not "lora" in name ]
+        self.model_def = model_def
+        self.pipeline_config = model_def["LTXV_config"]        
         # with safe_open(ckpt_path, framework="pt") as f:
         #     metadata = f.metadata()
         #     config_str = metadata.get("config")
@@ -220,11 +221,11 @@ class LTXV:
             prompt_enhancer_llm_model = None
             prompt_enhancer_llm_tokenizer = None
 
-        if prompt_enhancer_image_caption_model != None:
-            pipe["prompt_enhancer_image_caption_model"] = prompt_enhancer_image_caption_model
-            prompt_enhancer_image_caption_model._model_dtype = torch.float
+        # if prompt_enhancer_image_caption_model != None:
+        #     pipe["prompt_enhancer_image_caption_model"] = prompt_enhancer_image_caption_model
+        #     prompt_enhancer_image_caption_model._model_dtype = torch.float
         
-            pipe["prompt_enhancer_llm_model"] = prompt_enhancer_llm_model
+        #     pipe["prompt_enhancer_llm_model"] = prompt_enhancer_llm_model
 
         # offload.profile(pipe, profile_no=5, extraModelsToQuantize = None, quantizeTransformer = False, budgets = { "prompt_enhancer_llm_model" : 10000, "prompt_enhancer_image_caption_model" : 10000, "vae" : 3000, "*" : 100 }, verboseLevel=2)
 
@@ -299,14 +300,10 @@ class LTXV:
             conditioning_media_paths = None
             conditioning_start_frames = None
 
-        if self.distilled :
-            pipeline_config = "ltx_video/configs/ltxv-13b-0.9.7-distilled.yaml"
-        else:
-            pipeline_config = "ltx_video/configs/ltxv-13b-0.9.7-dev.yaml"
         # check if pipeline_config is a file
-        if not os.path.isfile(pipeline_config):
-            raise ValueError(f"Pipeline config file {pipeline_config} does not exist")
-        with open(pipeline_config, "r") as f:
+            if not os.path.isfile(self.pipeline_config):
+                raise ValueError(f"Pipeline config file {self.pipeline_config} does not exist")
+        with open(self.pipeline_config, "r") as f:
             pipeline_config = yaml.safe_load(f)
 
 
@@ -520,7 +517,7 @@ def get_media_num_frames(media_path: str) -> int:
         return media_path.shape[1]
     elif isinstance(media_path, str) and any( media_path.lower().endswith(ext) for ext in [".mp4", ".avi", ".mov", ".mkv"]):
         reader = imageio.get_reader(media_path)
-        return min(reader.count_frames(), max_frames)
+        return min(reader.count_frames(), 0) # to do
     else:
         raise Exception("video format not supported")
 
@@ -564,6 +561,3 @@ def load_media_file(
         raise Exception("video format not supported")
     return media_tensor
 
-
-if __name__ == "__main__":
-    main()

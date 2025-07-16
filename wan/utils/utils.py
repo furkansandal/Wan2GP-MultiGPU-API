@@ -5,7 +5,8 @@ import os
 import os.path as osp
 import torchvision.transforms.functional as TF
 import torch.nn.functional as F
-
+import cv2
+import tempfile
 import imageio
 import torch
 import decord
@@ -32,7 +33,22 @@ def seed_everything(seed: int):
         torch.cuda.manual_seed(seed)
     if torch.backends.mps.is_available():
         torch.mps.manual_seed(seed)
-        
+
+def expand_slist(slist, num_inference_steps ):
+    new_slist= []
+    inc =  len(slist) / num_inference_steps 
+    pos = 0
+    for i in range(num_inference_steps):
+        new_slist.append(slist[ int(pos)])
+        pos += inc
+    return new_slist
+
+def update_loras_slists(trans, slists, num_inference_steps ):
+    from mmgp import offload
+    slists = [ expand_slist(slist, num_inference_steps ) if isinstance(slist, list) else slist for slist in slists ]
+    nos = [str(l) for l in range(len(slists))]
+    offload.activate_loras(trans, nos, slists ) 
+
 def resample(video_fps, video_frames_count, max_target_frames_count, target_fps, start_target_frame ):
     import math
 
@@ -101,6 +117,29 @@ def get_video_frame(file_name, frame_no):
     img = Image.fromarray(frame.numpy().astype(np.uint8))
     return img
 
+def convert_image_to_video(image):
+    if image is None:
+        return None
+    
+    # Convert PIL/numpy image to OpenCV format if needed
+    if isinstance(image, np.ndarray):
+        # Gradio images are typically RGB, OpenCV expects BGR
+        img_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    else:
+        # Handle PIL Image
+        img_array = np.array(image)
+        img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+    
+    height, width = img_bgr.shape[:2]
+    
+    # Create temporary video file (auto-cleaned by Gradio)
+    with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_video:
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(temp_video.name, fourcc, 30.0, (width, height))
+        out.write(img_bgr)
+        out.release()
+        return temp_video.name
+    
 def resize_lanczos(img, h, w):
     img = Image.fromarray(np.clip(255. * img.movedim(0, -1).cpu().numpy(), 0, 255).astype(np.uint8))
     img = img.resize((w,h), resample=Image.Resampling.LANCZOS) 

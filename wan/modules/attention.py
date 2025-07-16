@@ -185,7 +185,7 @@ def pay_attention(
     q,k,v = qkv_list
     qkv_list.clear()
     out_dtype = q.dtype
-    if  q.dtype == torch.bfloat16 and not bfloat16_supported:
+    if q.dtype == torch.bfloat16 and not bfloat16_supported:
         q = q.to(torch.float16)
         k = k.to(torch.float16)
         v = v.to(torch.float16)
@@ -194,7 +194,9 @@ def pay_attention(
 
     q = q.to(v.dtype)
     k = k.to(v.dtype)
-
+    batch = len(q)
+    if len(k) != batch: k = k.expand(batch, -1, -1, -1)
+    if len(v) != batch: v = v.expand(batch, -1, -1, -1)
     if attn == "chipmunk":
         from src.chipmunk.modules import SparseDiffMlp, SparseDiffAttn
         from src.chipmunk.util import LayerCounter, GLOBAL_CONFIG

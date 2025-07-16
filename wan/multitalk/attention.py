@@ -333,7 +333,7 @@ class SingleStreamMutiAttention(SingleStreamAttention):
 
         human1 = normalize_and_scale(x_ref_attn_map[0], (human1_min_value, human1_max_value), (self.rope_h1[0], self.rope_h1[1]))
         human2 = normalize_and_scale(x_ref_attn_map[1], (human2_min_value, human2_max_value), (self.rope_h2[0], self.rope_h2[1]))
-        back   = torch.full((x_ref_attn_map.size(1),), self.rope_bak, dtype=human1.dtype).to(human1.device)
+        back   = torch.full((x_ref_attn_map.size(1),), self.rope_bak, dtype=human1.dtype, device=human1.device)
         max_indices = x_ref_attn_map.argmax(dim=0)
         normalized_map = torch.stack([human1, human2, back], dim=1)
         normalized_pos = normalized_map[range(x_ref_attn_map.size(1)), max_indices] # N 
@@ -351,7 +351,7 @@ class SingleStreamMutiAttention(SingleStreamAttention):
         if self.qk_norm:
             encoder_k = self.add_k_norm(encoder_k)
 
-        per_frame = torch.zeros(N_a, dtype=encoder_k.dtype).to(encoder_k.device)
+        per_frame = torch.zeros(N_a, dtype=encoder_k.dtype, device=encoder_k.device)
         per_frame[:per_frame.size(0)//2] = (self.rope_h1[0] + self.rope_h1[1]) / 2
         per_frame[per_frame.size(0)//2:] = (self.rope_h2[0] + self.rope_h2[1]) / 2
         encoder_pos = torch.concat([per_frame]*N_t, dim=0)

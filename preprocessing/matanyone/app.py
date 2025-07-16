@@ -65,6 +65,7 @@ def get_frames_from_image(image_input, image_state):
     Return 
         [[0:nearest_frame], [nearest_frame:], nearest_frame]
     """
+    load_sam()
 
     user_name = time.time()
     frames = [image_input] * 2  # hardcode: mimic a video with 2 frames
@@ -89,7 +90,7 @@ def get_frames_from_image(image_input, image_state):
                         gr.update(visible=True), gr.update(visible=True), \
                         gr.update(visible=True), gr.update(visible=True),\
                         gr.update(visible=True), gr.update(visible=True), \
-                        gr.update(visible=True), gr.update(visible=False), \
+                        gr.update(visible=True), gr.update(value="", visible=True),  gr.update(visible=False), \
                         gr.update(visible=False), gr.update(visible=True), \
                         gr.update(visible=True)
 
@@ -102,6 +103,8 @@ def get_frames_from_video(video_input, video_state):
     Return 
         [[0:nearest_frame], [nearest_frame:], nearest_frame]
     """
+
+    load_sam()
 
     while model == None:
         time.sleep(1)
@@ -273,6 +276,20 @@ def save_video(frames, output_path, fps):
 
     return output_path
 
+def mask_to_xyxy_box(mask):
+    rows, cols = np.where(mask == 255)
+    xmin = min(cols)
+    xmax = max(cols) + 1
+    ymin = min(rows)
+    ymax = max(rows) + 1
+    xmin = max(xmin, 0)
+    ymin = max(ymin, 0)
+    xmax = min(xmax, mask.shape[1])
+    ymax = min(ymax, mask.shape[0])
+    box = [xmin, ymin, xmax, ymax]
+    box = [int(x) for x in box]
+    return box
+
 # image matting
 def image_matting(video_state, interactive_state, mask_dropdown, erode_kernel_size, dilate_kernel_size, refine_iter):
     matanyone_processor = InferenceCore(matanyone_model, cfg=matanyone_model.cfg)
@@ -320,9 +337,17 @@ def image_matting(video_state, interactive_state, mask_dropdown, erode_kernel_si
     foreground = output_frames
 
     foreground_output = Image.fromarray(foreground[-1])
-    alpha_output = Image.fromarray(alpha[-1][:,:,0])
-
-    return foreground_output, gr.update(visible=True) 
+    alpha_output = alpha[-1][:,:,0]
+    frame_temp = alpha_output.copy()
+    alpha_output[frame_temp > 127] = 0
+    alpha_output[frame_temp <= 127] = 255
+    bbox_info = mask_to_xyxy_box(alpha_output)
+    h = alpha_output.shape[0]
+    w = alpha_output.shape[1]
+    bbox_info = [str(int(bbox_info[0]/ w * 100 )), str(int(bbox_info[1]/ h * 100 )),  str(int(bbox_info[2]/ w * 100 )), str(int(bbox_info[3]/ h * 100 )) ]
+    bbox_info = ":".join(bbox_info)
+    alpha_output = Image.fromarray(alpha_output)
+    return foreground_output, alpha_output, bbox_info, gr.update(visible=True), gr.update(visible=True) 
 
 # video matting
 def video_matting(video_state, end_slider, matting_type, interactive_state, mask_dropdown, erode_kernel_size, dilate_kernel_size):
@@ -469,6 +494,13 @@ def restart():
         gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), \
         gr.update(visible=False), gr.update(visible=False, choices=[], value=[]), "", gr.update(visible=False)
 
+def load_sam():
+    global model_loaded
+    global model
+    global matanyone_model 
+    model.samcontroler.sam_controler.model.to(arg_device)
+    matanyone_model.to(arg_device)
+
 def load_unload_models(selected):
     global model_loaded
     global model
@@ -476,8 +508,7 @@ def load_unload_models(selected):
     if selected:
         # print("Matanyone Tab Selected")
         if model_loaded:
-            model.samcontroler.sam_controler.model.to(arg_device)
-            matanyone_model.to(arg_device)
+            load_sam()
         else:
             # args, defined in track_anything.py
             sam_checkpoint_url_dict = {
@@ -522,11 +553,15 @@ def export_to_vace_video_input(foreground_video_output):
 
 def export_image(image_refs, image_output):
     gr.Info("Masked Image transferred to Current Video")
-    # return "MV#" + str(time.time()), foreground_video_output, alpha_video_output
     if image_refs == None:
         image_refs =[]
     image_refs.append( image_output)
     return image_refs
+
+def export_image_mask(image_input, image_mask):
+    gr.Info("Input Image & Mask transferred to Current Video")
+    return Image.fromarray(image_input), image_mask
+
 
 def export_to_current_video_engine(model_type, foreground_video_output, alpha_video_output):
     gr.Info("Original Video and Full Mask have been transferred")
@@ -543,7 +578,7 @@ def teleport_to_video_tab(tab_state):
     return gr.Tabs(selected="video_gen")
 
 
-def display(tabs, tab_state, model_choice, vace_video_input, vace_video_mask, vace_image_refs):
+def display(tabs, tab_state, model_choice, vace_video_input, vace_image_input, vace_video_mask, vace_image_mask, vace_image_refs):
     # my_tab.select(fn=load_unload_models, inputs=[], outputs=[])
 
     media_url = "https://github.com/pq-yang/MatAnyone/releases/download/media/"
@@ -677,7 +712,7 @@ def display(tabs, tab_state, model_choice, vace_video_input, vace_video_mask, va
                                 foreground_output_button = gr.Button(value="Black & White Video Output", visible=False, elem_classes="new_button")
                             with gr.Column(scale=2):
                                 alpha_video_output = gr.Video(label="B & W Mask Video Output", visible=False, elem_classes="video")
-                                alpha_output_button = gr.Button(value="Alpha Mask Output", visible=False, elem_classes="new_button")
+                                export_image_mask_btn = gr.Button(value="Alpha Mask Output", visible=False, elem_classes="new_button")
                         with gr.Row():
                             with gr.Row(visible= False):
                                 export_to_vace_video_14B_btn = gr.Button("Export to current Video Input Video For Inpainting", visible= False)
@@ -696,7 +731,7 @@ def display(tabs, tab_state, model_choice, vace_video_input, vace_video_mask, va
                     ],
                     outputs=[video_state, video_info, template_frame,
                             image_selection_slider, end_selection_slider,  track_pause_number_slider, point_prompt, matting_type, clear_button_click, add_mask_button, matting_button, template_frame,
-                            foreground_video_output, alpha_video_output, foreground_output_button, alpha_output_button, mask_dropdown, step2_title]
+                            foreground_video_output, alpha_video_output, foreground_output_button, export_image_mask_btn, mask_dropdown, step2_title]
                 )   
 
                 # second step: select images from slider
@@ -755,7 +790,7 @@ def display(tabs, tab_state, model_choice, vace_video_input, vace_video_mask, va
                         foreground_video_output, alpha_video_output,
                         template_frame,
                         image_selection_slider, end_selection_slider, track_pause_number_slider,point_prompt, export_to_vace_video_14B_btn, export_to_current_video_engine_btn, matting_type, clear_button_click, 
-                        add_mask_button, matting_button, template_frame, foreground_video_output, alpha_video_output, remove_mask_button, foreground_output_button, alpha_output_button, mask_dropdown, video_info, step2_title
+                        add_mask_button, matting_button, template_frame, foreground_video_output, alpha_video_output, remove_mask_button, foreground_output_button, export_image_mask_btn, mask_dropdown, video_info, step2_title
                     ],
                     queue=False,
                     show_progress=False)
@@ -770,7 +805,7 @@ def display(tabs, tab_state, model_choice, vace_video_input, vace_video_mask, va
                         foreground_video_output, alpha_video_output,
                         template_frame,
                         image_selection_slider , end_selection_slider, track_pause_number_slider,point_prompt, export_to_vace_video_14B_btn, export_to_current_video_engine_btn, matting_type, clear_button_click, 
-                        add_mask_button, matting_button, template_frame, foreground_video_output, alpha_video_output, remove_mask_button, foreground_output_button, alpha_output_button, mask_dropdown, video_info, step2_title
+                        add_mask_button, matting_button, template_frame, foreground_video_output, alpha_video_output, remove_mask_button, foreground_output_button, export_image_mask_btn, mask_dropdown, video_info, step2_title
                     ],
                     queue=False,
                     show_progress=False)
@@ -872,14 +907,18 @@ def display(tabs, tab_state, model_choice, vace_video_input, vace_video_mask, va
                     # output image
                     with gr.Row(equal_height=True):
                         foreground_image_output = gr.Image(type="pil", label="Foreground Output", visible=False, elem_classes="image")
+                        alpha_image_output = gr.Image(type="pil", label="Mask", visible=False, elem_classes="image")
+                    with gr.Row(equal_height=True):
+                        bbox_info = gr.Text(label ="Mask BBox Info (Left:Top:Right:Bottom)", interactive= False)
                     with gr.Row():
-                        with gr.Row():
-                            export_image_btn = gr.Button(value="Add to current Reference Images", visible=False, elem_classes="new_button")
-                    with gr.Column(scale=2, visible= False):
-                        alpha_image_output = gr.Image(type="pil", label="Alpha Output", visible=False, elem_classes="image")
-                        alpha_output_button = gr.Button(value="Alpha Mask Output", visible=False, elem_classes="new_button")
+                        # with gr.Row():
+                        export_image_btn = gr.Button(value="Add to current Reference Images", visible=False, elem_classes="new_button")
+                    # with gr.Column(scale=2, visible= True):
+                        export_image_mask_btn = gr.Button(value="Set to Control Image & Mask", visible=False, elem_classes="new_button")
 
                 export_image_btn.click(  fn=export_image, inputs= [vace_image_refs, foreground_image_output], outputs= [vace_image_refs]).then( #video_prompt_video_guide_trigger, 
+                    fn=teleport_to_video_tab, inputs= [tab_state], outputs= [tabs])
+                export_image_mask_btn.click(  fn=export_image_mask, inputs= [image_input, alpha_image_output], outputs= [vace_image_input, vace_image_mask]).then( #video_prompt_video_guide_trigger, 
                     fn=teleport_to_video_tab, inputs= [tab_state], outputs= [tabs])
 
                 # first step: get the image information 
@@ -890,8 +929,16 @@ def display(tabs, tab_state, model_choice, vace_video_input, vace_video_mask, va
                     ],
                     outputs=[image_state, image_info, template_frame,
                             image_selection_slider, track_pause_number_slider,point_prompt, clear_button_click, add_mask_button, matting_button, template_frame,
-                            foreground_image_output, alpha_image_output, export_image_btn, alpha_output_button, mask_dropdown, step2_title]
+                            foreground_image_output, alpha_image_output, bbox_info, export_image_btn, export_image_mask_btn, mask_dropdown, step2_title]
                 )   
+
+                # points clear
+                clear_button_click.click(
+                    fn = clear_click,
+                    inputs = [image_state, click_state,],
+                    outputs = [template_frame,click_state],
+                )
+
 
                 # second step: select images from slider
                 image_selection_slider.release(fn=select_image_template, 
@@ -925,7 +972,7 @@ def display(tabs, tab_state, model_choice, vace_video_input, vace_video_mask, va
                 matting_button.click(
                     fn=image_matting,
                     inputs=[image_state, interactive_state, mask_dropdown, erode_kernel_size, dilate_kernel_size, image_selection_slider],
-                    outputs=[foreground_image_output, export_image_btn]
+                    outputs=[foreground_image_output, alpha_image_output,bbox_info, export_image_btn, export_image_mask_btn]
                 )
 
 

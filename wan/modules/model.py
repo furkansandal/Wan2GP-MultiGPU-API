@@ -33,9 +33,10 @@ def sinusoidal_embedding_1d(dim, position):
 
 
 def reshape_latent(latent, latent_frames):
-    if latent_frames == latent.shape[0]:
-        return latent
-    return latent.reshape(latent_frames, -1, latent.shape[-1] )
+    return latent.reshape(latent.shape[0], latent_frames, -1, latent.shape[-1] )
+
+def restore_latent_shape(latent):
+    return latent.reshape(latent.shape[0], -1, latent.shape[-1] )
 
 
 def identify_k( b: float, d: int, N: int):
@@ -493,7 +494,7 @@ class WanAttentionBlock(nn.Module):
         x_mod = reshape_latent(x_mod , latent_frames)
         x_mod *= 1 + e[1]
         x_mod += e[0]
-        x_mod = reshape_latent(x_mod , 1)
+        x_mod = restore_latent_shape(x_mod)
         if cam_emb != None:
             cam_emb = self.cam_encoder(cam_emb)
             cam_emb = cam_emb.repeat(1, 2, 1)
@@ -510,7 +511,7 @@ class WanAttentionBlock(nn.Module):
 
         x, y = reshape_latent(x , latent_frames), reshape_latent(y , latent_frames)
         x.addcmul_(y, e[2])
-        x, y = reshape_latent(x , 1), reshape_latent(y , 1)
+        x, y = restore_latent_shape(x), restore_latent_shape(y)
         del y
         y = self.norm3(x)
         y = y.to(attention_dtype)
@@ -542,7 +543,7 @@ class WanAttentionBlock(nn.Module):
         y = reshape_latent(y , latent_frames)
         y *= 1 + e[4]
         y += e[3]
-        y = reshape_latent(y , 1)
+        y = restore_latent_shape(y)
         y = y.to(attention_dtype)
 
         ffn = self.ffn[0]
@@ -562,7 +563,7 @@ class WanAttentionBlock(nn.Module):
         y = y.to(dtype)
         x, y = reshape_latent(x , latent_frames), reshape_latent(y , latent_frames)
         x.addcmul_(y, e[5])
-        x, y = reshape_latent(x , 1), reshape_latent(y , 1)
+        x, y = restore_latent_shape(x), restore_latent_shape(y)
 
         if hints_processed is not None:
             for hint, scale in zip(hints_processed, context_scale):
@@ -669,6 +670,8 @@ class VaceWanAttentionBlock(WanAttentionBlock):
         hints[0] = None
         if self.block_id == 0:
             c = self.before_proj(c)
+            bz = x.shape[0]
+            if bz > c.shape[0]: c = c.repeat(bz, 1, 1 )
             c += x
         c = super().forward(c, **kwargs)
         c_skip = self.after_proj(c)
@@ -707,7 +710,7 @@ class Head(nn.Module):
         x = reshape_latent(x , latent_frames)
         x *= (1 + e[1])
         x += e[0]
-        x = reshape_latent(x , 1)
+        x = restore_latent_shape(x)
         x= x.to(self.head.weight.dtype)
         x = self.head(x)
         return x
@@ -1162,11 +1165,15 @@ class WanModel(ModelMixin, ConfigMixin):
                 x_list[i] = x_list[0].clone()
                 last_x_idx = i
             else:
-                # image source                
+                # image source
+                bz = len(x)
                 if y is not None:
-                    x = torch.cat([x, y], dim=0)
+                    y = y.unsqueeze(0)        
+                    if bz > 1: y = y.expand(bz, -1, -1, -1, -1)
+                    x = torch.cat([x, y], dim=1)
                 # embeddings
-                x = self.patch_embedding(x.unsqueeze(0)).to(modulation_dtype)
+                # x = self.patch_embedding(x.unsqueeze(0)).to(modulation_dtype)
+                x = self.patch_embedding(x).to(modulation_dtype)
                 grid_sizes = x.shape[2:]
                 if chipmunk:
                     x = x.unsqueeze(-1)
@@ -1204,7 +1211,7 @@ class WanModel(ModelMixin, ConfigMixin):
         )  # b, dim        
         e0 = self.time_projection(e).unflatten(1, (6, self.dim)).to(e.dtype)
 
-        if self.inject_sample_info:
+        if self.inject_sample_info and fps!=None:
             fps = torch.tensor(fps, dtype=torch.long, device=device)
 
             fps_emb = self.fps_embedding(fps).to(e.dtype) 
@@ -1402,7 +1409,7 @@ class WanModel(ModelMixin, ConfigMixin):
             x_list[i] = self.unpatchify(x, grid_sizes)
             del x
 
-        return [x[0].float() for x in x_list]
+        return [x.float() for x in x_list]
 
     def unpatchify(self, x, grid_sizes):
         r"""
@@ -1427,7 +1434,10 @@ class WanModel(ModelMixin, ConfigMixin):
             u = torch.einsum('fhwpqrc->cfphqwr', u)
             u = u.reshape(c, *[i * j for i, j in zip(grid_sizes, self.patch_size)])
             out.append(u)
-        return out
+        if len(x) == 1:
+            return out[0].unsqueeze(0)
+        else:
+            return torch.stack(out, 0)
 
     def init_weights(self):
         r"""

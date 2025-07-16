@@ -184,6 +184,7 @@ def get_full_audio_embeddings(audio_guide1 = None, audio_guide2 = None, combinat
 
 
 def get_window_audio_embeddings(full_audio_embs, audio_start_idx=0, clip_length = 81, vae_scale = 4, audio_window = 5):
+    if full_audio_embs == None: return None
     HUMAN_NUMBER = len(full_audio_embs)
     audio_end_idx = audio_start_idx + clip_length
     indices = (torch.arange(2 * 2 + 1) - 2) * 1 
@@ -271,6 +272,34 @@ def timestep_transform(
     new_t = new_t * num_timesteps
     return new_t
 
+def parse_speakers_locations(speakers_locations):
+    bbox = {}
+    if speakers_locations is None or len(speakers_locations) == 0:
+        return None, ""
+    speakers = speakers_locations.split(" ")
+    if len(speakers) !=2:
+        error= "Two speakers locations should be defined"
+        return "", error
+    
+    for i, speaker in enumerate(speakers):
+        location = speaker.strip().split(":")
+        if len(location) not in (2,4):
+            error = f"Invalid Speaker Location '{location}'. A Speaker Location should be defined in the format Left:Right or usuing a BBox Left:Top:Right:Bottom"
+            return "", error
+        try:
+            good = False
+            location_float = [ float(val) for val in location]
+            good = all( 0 <= val <= 100 for val in location_float)
+        except:
+            pass
+        if not good:
+            error = f"Invalid Speaker Location '{location}'. Each number should be between 0 and 100."
+            return "", error
+        if len(location_float) == 2:
+            location_float = [location_float[0], 0, location_float[1], 100]
+        bbox[f"human{i}"] = location_float
+    return bbox, ""
+
 
 # construct human mask
 def get_target_masks(HUMAN_NUMBER, lat_h, lat_w, src_h, src_w, face_scale = 0.05, bbox = None):
@@ -285,7 +314,9 @@ def get_target_masks(HUMAN_NUMBER, lat_h, lat_w, src_h, src_w, face_scale = 0.05
             assert len(bbox) == HUMAN_NUMBER, f"The number of target bbox should be the same with cond_audio"
             background_mask = torch.zeros([src_h, src_w])
             for _, person_bbox in bbox.items():
-                x_min, y_min, x_max, y_max = person_bbox
+                y_min, x_min, y_max, x_max = person_bbox
+                x_min, y_min, x_max, y_max = max(x_min,5), max(y_min, 5), min(x_max,95), min(y_max,95)                
+                x_min, y_min, x_max, y_max =  int(src_h * x_min / 100), int(src_w * y_min / 100), int(src_h * x_max / 100), int(src_w * y_max / 100)
                 human_mask = torch.zeros([src_h, src_w])
                 human_mask[int(x_min):int(x_max), int(y_min):int(y_max)] = 1
                 background_mask += human_mask
@@ -305,7 +336,7 @@ def get_target_masks(HUMAN_NUMBER, lat_h, lat_w, src_h, src_w, face_scale = 0.05
             human_masks = [human_mask1, human_mask2]
         background_mask = torch.where(background_mask > 0, torch.tensor(0), torch.tensor(1))
         human_masks.append(background_mask)
-    
+    # toto = Image.fromarray(human_masks[2].mul_(255).unsqueeze(-1).repeat(1,1,3).to(torch.uint8).cpu().numpy())
     ref_target_masks = torch.stack(human_masks, dim=0) #.to(self.device)
     # resize and centercrop for ref_target_masks 
     # ref_target_masks = resize_and_centercrop(ref_target_masks, (target_h, target_w))
