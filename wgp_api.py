@@ -468,6 +468,15 @@ def load_model():
                 )
                 prompt_enhancer_llm_tokenizer = AutoTokenizer.from_pretrained("ckpts/Llama3_2")
                 logger.info("Loaded Llama 3.2 for prompt enhancement")
+                
+                # Compile models for faster inference if supported
+                if hasattr(torch, 'compile') and torch.cuda.get_device_capability()[0] >= 7:
+                    try:
+                        logger.info("Compiling Llama model for faster inference...")
+                        prompt_enhancer_llm_model = torch.compile(prompt_enhancer_llm_model, mode="reduce-overhead")
+                        logger.info("Llama model compiled successfully")
+                    except Exception as e:
+                        logger.warning(f"Could not compile Llama model: {e}")
             else:
                 logger.warning("Llama3_2 model not found, LLM enhancement disabled")
                 
@@ -709,27 +718,44 @@ async def enhance_prompt(prompt: str, image: Image.Image) -> str:
             logger.info("Generating image caption...")
             caption_start_time = time.time()
             
-            # Prepare image for Florence
+            # Prepare image for Florence - resize for speed
+            # Florence2 works well with smaller images
+            if image.width > 768 or image.height > 768:
+                image_for_caption = image.copy()
+                image_for_caption.thumbnail((768, 768), Image.Resampling.LANCZOS)
+            else:
+                image_for_caption = image
+                
             inputs = prompt_enhancer_image_caption_processor(
                 text="<DETAILED_CAPTION>", 
-                images=image, 
+                images=image_for_caption, 
                 return_tensors="pt"
             )
             
             # Move inputs to device
             inputs = {k: v.to(device) if torch.is_tensor(v) else v for k, v in inputs.items()}
             
-            # Generate caption
+            # Generate caption with optimized settings
             with torch.inference_mode():
+                # Set attention mode for Florence2 if using sage
+                if args.attention in ["sage", "sage2"]:
+                    original_attn = offload.shared_state.get("_attention", "sdpa")
+                    offload.shared_state["_attention"] = args.attention
+                    
                 # Only pass input_ids and pixel_values like in prompt_enhance_utils.py
                 generated_ids = prompt_enhancer_image_caption_model.generate(
                     input_ids=inputs["input_ids"],
                     pixel_values=inputs["pixel_values"],
-                    max_new_tokens=2048,
-                    early_stopping=False,
+                    max_new_tokens=512,  # Balanced - enough for detailed captions
+                    early_stopping=True,  # Stop when EOS token is generated
                     do_sample=False,
-                    num_beams=3,
+                    num_beams=2,  # Balanced - better quality than greedy
+                    use_cache=True,  # Enable KV cache
                 )
+                
+                # Restore attention mode
+                if args.attention in ["sage", "sage2"]:
+                    offload.shared_state["_attention"] = original_attn
             
             # Decode caption - matching prompt_enhance_utils.py
             image_captions = prompt_enhancer_image_caption_processor.batch_decode(
@@ -776,11 +802,12 @@ Create an enhanced video generation prompt that brings this scene to life with m
                 
                 outputs = prompt_enhancer_llm_model.generate(
                     **inputs,
-                    max_new_tokens=100,  # Reduced from 200 for faster generation
-                    temperature=0.8,
+                    max_new_tokens=150,  # Enough for detailed prompts
+                    temperature=0.8,  # Balanced creativity
                     do_sample=True,
                     top_p=0.9,
                     use_cache=True,  # Enable KV cache for faster generation
+                    repetition_penalty=1.05,  # Subtle repetition penalty
                 )
                 
                 # Restore original attention if changed
