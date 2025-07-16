@@ -425,17 +425,18 @@ def load_model():
             if os.path.exists("ckpts/Florence2"):
                 prompt_enhancer_image_caption_model = AutoModelForCausalLM.from_pretrained(
                     "ckpts/Florence2", 
-                    trust_remote_code=True,
-                    torch_dtype=torch.bfloat16
-                ).to(device)
+                    trust_remote_code=True
+                )
                 prompt_enhancer_image_caption_processor = AutoProcessor.from_pretrained(
                     "ckpts/Florence2", 
                     trust_remote_code=True
                 )
+                # Set model dtype to float as in wgp.py
+                prompt_enhancer_image_caption_model._model_dtype = torch.float
                 logger.info("Loaded Florence 2 for image captioning")
             else:
                 logger.warning("Florence2 model not found, prompt enhancement disabled")
-            
+        
             # Llama 3.2 for prompt enhancement
             if os.path.exists("ckpts/Llama3_2/Llama3_2_quanto_bf16_int8.safetensors"):
                 prompt_enhancer_llm_model = offload.fast_load_transformers_model(
@@ -668,11 +669,6 @@ async def enhance_prompt(prompt: str, image: Image.Image) -> str:
                 images=image, 
                 return_tensors="pt"
             )
-            # Move to device and ensure correct dtype
-            inputs = {k: v.to(device) if torch.is_tensor(v) else v for k, v in inputs.items()}
-            # Ensure float inputs are in bfloat16
-            if 'pixel_values' in inputs and inputs['pixel_values'].dtype == torch.float32:
-                inputs['pixel_values'] = inputs['pixel_values'].to(torch.bfloat16)
             
             # Generate caption
             with torch.no_grad():
