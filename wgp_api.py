@@ -743,6 +743,7 @@ Create an enhanced video generation prompt that brings this scene to life with m
             return enhanced_prompt
         
         # If enhancement failed, return original prompt
+        logger.error(f"Enhance prompt failed, returning original prompt: {prompt}, prompt_enhancer_llm_model: {prompt_enhancer_llm_model}, prompt_enhancer_llm_tokenizer: {prompt_enhancer_llm_tokenizer}, image_caption: {image_caption}")
         return prompt
         
     except Exception as e:
