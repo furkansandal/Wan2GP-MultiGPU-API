@@ -426,9 +426,8 @@ def load_model():
                 prompt_enhancer_image_caption_model = AutoModelForCausalLM.from_pretrained(
                     "ckpts/Florence2", 
                     trust_remote_code=True,
-                    torch_dtype=torch.bfloat16,
-                    device_map=device
-                )
+                    torch_dtype=torch.bfloat16
+                ).to(device)
                 prompt_enhancer_image_caption_processor = AutoProcessor.from_pretrained(
                     "ckpts/Florence2", 
                     trust_remote_code=True
@@ -668,7 +667,12 @@ async def enhance_prompt(prompt: str, image: Image.Image) -> str:
                 text="<MORE_DETAILED_CAPTION>", 
                 images=image, 
                 return_tensors="pt"
-            ).to(device)
+            )
+            # Move to device and ensure correct dtype
+            inputs = {k: v.to(device) if torch.is_tensor(v) else v for k, v in inputs.items()}
+            # Ensure float inputs are in bfloat16
+            if 'pixel_values' in inputs and inputs['pixel_values'].dtype == torch.float32:
+                inputs['pixel_values'] = inputs['pixel_values'].to(torch.bfloat16)
             
             # Generate caption
             with torch.no_grad():
