@@ -269,10 +269,15 @@ def get_model_filename(model_type, quantization='', dtype_policy=''):
 
 def get_ltxv_text_encoder_filename(quantization):
     """Get text encoder filename based on quantization"""
-    if quantization == "int8":
-        return "ckpts/T5_xxl_1.1/T5_xxl_1.1_enc_quanto_bf16_int8.safetensors"
+    # Check which text encoder files are available
+    int8_path = "ckpts/T5_xxl_1.1/T5_xxl_1.1_enc_quanto_bf16_int8.safetensors"
+    bf16_path = "ckpts/T5_xxl_1.1/T5_xxl_1.1_enc_bf16.safetensors"
+    
+    if quantization == "int8" and os.path.exists(int8_path):
+        return int8_path
     else:
-        return "ckpts/T5_xxl_1.1/T5_xxl_1.1_enc_bf16.safetensors"
+        # Fallback to bf16 version which is available
+        return bf16_path
 
 
 def load_image_to_tensor_with_resize_and_crop(
