@@ -433,6 +433,8 @@ def load_model():
                 )
                 # Set model dtype to float as in wgp.py
                 prompt_enhancer_image_caption_model._model_dtype = torch.float
+                # Move model to device
+                prompt_enhancer_image_caption_model = prompt_enhancer_image_caption_model.to(device)
                 logger.info("Loaded Florence 2 for image captioning")
             else:
                 logger.warning("Florence2 model not found, prompt enhancement disabled")
@@ -669,6 +671,9 @@ async def enhance_prompt(prompt: str, image: Image.Image) -> str:
                 images=image, 
                 return_tensors="pt"
             )
+            
+            # Move inputs to device
+            inputs = {k: v.to(device) if torch.is_tensor(v) else v for k, v in inputs.items()}
             
             # Generate caption
             with torch.no_grad():
