@@ -440,8 +440,10 @@ def load_model():
         
             # Llama 3.2 for prompt enhancement
             if os.path.exists("ckpts/Llama3_2/Llama3_2_quanto_bf16_int8.safetensors"):
+                # Load with attention optimization
                 prompt_enhancer_llm_model = offload.fast_load_transformers_model(
-                    "ckpts/Llama3_2/Llama3_2_quanto_bf16_int8.safetensors"
+                    "ckpts/Llama3_2/Llama3_2_quanto_bf16_int8.safetensors",
+                    configKwargs={"_attn_implementation": "flash_attention_2"}  # Try Flash Attention
                 )
                 prompt_enhancer_llm_tokenizer = AutoTokenizer.from_pretrained("ckpts/Llama3_2")
                 logger.info("Loaded Llama 3.2 for prompt enhancement")
@@ -511,6 +513,22 @@ def load_model():
         except Exception as e:
             logger.warning(f"Failed to set offload profile: {e}. Continuing without profile optimization.")
             offloadobj = None
+        
+        # Move prompt enhancement models to GPU after offload profile
+        if prompt_enhancer_llm_model and offloadobj:
+            try:
+                # Get the device assignment from offload
+                device_assignment = offloadobj.get_model_device("prompt_enhancer_llm_model")
+                if device_assignment and device_assignment != "cpu":
+                    logger.info(f"Moving Llama model to {device_assignment}")
+                else:
+                    # Force to GPU if not assigned
+                    prompt_enhancer_llm_model = prompt_enhancer_llm_model.to(device)
+                    logger.info(f"Manually moved Llama model to {device}")
+            except:
+                # Fallback: move to GPU
+                prompt_enhancer_llm_model = prompt_enhancer_llm_model.to(device)
+                logger.info(f"Fallback: moved Llama model to {device}")
         
         logger.info("Model loaded successfully!")
         
@@ -731,7 +749,7 @@ Create an enhanced video generation prompt that brings this scene to life with m
             with torch.no_grad():
                 outputs = prompt_enhancer_llm_model.generate(
                     **inputs,
-                    max_new_tokens=200,
+                    max_new_tokens=100,  # Reduced from 200 for faster generation
                     temperature=0.8,
                     do_sample=True,
                     top_p=0.9,
