@@ -552,7 +552,7 @@ class WanAttentionBlock(nn.Module):
 
         y_shape = y.shape
         y = y.view(-1, y_shape[-1])
-        chunk_size = int(y_shape[1]/2.7)
+        chunk_size = int(y.shape[0]/2.7)
         chunks =torch.split(y, chunk_size)
         for y_chunk  in chunks:
             mlp_chunk = ffn(y_chunk)

@@ -99,7 +99,7 @@ def get_video_info(video_path):
     cap = cv2.VideoCapture(video_path)
     
     # Get FPS
-    fps = cap.get(cv2.CAP_PROP_FPS)
+    fps = round(cap.get(cv2.CAP_PROP_FPS))
     
     # Get resolution
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -493,10 +493,10 @@ def extract_audio_tracks(source_video, verbose=False, query_only= False):
         
     except ffmpeg.Error as e:
         print(f"FFmpeg error during audio extraction: {e}")
-        return []
+        return 0 if query_only else []
     except Exception as e:
         print(f"Error during audio extraction: {e}")
-        return []
+        return 0 if query_only else []
 
 def combine_video_with_audio_tracks(target_video, audio_tracks, output_video, verbose=False):
     """

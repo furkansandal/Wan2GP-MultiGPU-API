@@ -128,7 +128,7 @@ def get_attn_map_with_target(visual_q, ref_k, shape, ref_target_masks=None, spli
 
     _, seq_lens, heads, _ = visual_q.shape
     class_num, _ = ref_target_masks.shape
-    x_ref_attn_maps = torch.zeros(class_num, seq_lens, dtype=visual_q.device, device=visual_q.dtype)
+    x_ref_attn_maps = torch.zeros(class_num, seq_lens, dtype=visual_q.dtype, device=visual_q.device)
 
     split_chunk = heads // split_num
     

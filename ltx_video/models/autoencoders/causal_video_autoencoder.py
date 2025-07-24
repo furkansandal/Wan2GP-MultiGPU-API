@@ -253,10 +253,12 @@ class CausalVideoAutoencoder(AutoencoderKLWrapper):
                 if key.startswith("vae.")
             }
 
+
+        stats_keys_to_keep = ["per_channel_statistics.std-of-means", "per_channel_statistics.mean-of-means"]
         ckpt_state_dict = {
             key: value
             for key, value in state_dict.items()
-            if not key.startswith(PER_CHANNEL_STATISTICS_PREFIX)
+            if not key.startswith(PER_CHANNEL_STATISTICS_PREFIX) or key in stats_keys_to_keep
         }
 
         model_keys = set(name for name, _ in self.named_modules())
@@ -280,21 +282,26 @@ class CausalVideoAutoencoder(AutoencoderKLWrapper):
 
             converted_state_dict[key] = value
 
+        # data_dict = {
+        #     key.removeprefix(PER_CHANNEL_STATISTICS_PREFIX): value
+        #     for key, value in state_dict.items()
+        #     if key in stats_keys_to_keep
+        # }
+        for key in stats_keys_to_keep:
+            if key in converted_state_dict: # happens only in the original vae sd 
+                v = converted_state_dict.pop(key)
+                converted_state_dict[key.removeprefix(PER_CHANNEL_STATISTICS_PREFIX).replace("-", "_")] = v
+
         a,b = super().load_state_dict(converted_state_dict, strict=strict, assign=assign)
 
-        data_dict = {
-            key.removeprefix(PER_CHANNEL_STATISTICS_PREFIX): value
-            for key, value in state_dict.items()
-            if key.startswith(PER_CHANNEL_STATISTICS_PREFIX)
-        }
-        if len(data_dict) > 0:
-            self.register_buffer("std_of_means", data_dict["std-of-means"],)
-            self.register_buffer(
-                "mean_of_means",
-                data_dict.get(
-                    "mean-of-means", torch.zeros_like(data_dict["std-of-means"])
-                ),
-            )
+        # if len(data_dict) > 0:
+        #     self.register_buffer("std_of_means", data_dict["std-of-means"],)
+        #     self.register_buffer(
+        #         "mean_of_means",
+        #         data_dict.get(
+        #             "mean-of-means", torch.zeros_like(data_dict["std-of-means"])
+        #         ),
+        #     )
         return a, b
 
     def last_layer(self):

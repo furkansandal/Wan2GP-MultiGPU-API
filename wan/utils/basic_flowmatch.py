@@ -53,7 +53,7 @@ class FlowMatchScheduler():
         else:
             sigma_ = self.sigmas[timestep_id + 1].reshape(-1, 1, 1, 1)
         prev_sample = sample + model_output * (sigma_ - sigma)
-        return prev_sample
+        return [prev_sample]
 
     def add_noise(self, original_samples, noise, timestep):
         """

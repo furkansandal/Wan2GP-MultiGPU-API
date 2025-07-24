@@ -44,12 +44,17 @@ class AutoencoderKLWrapper(ModelMixin, ConfigMixin):
         self.per_channel_statistics = nn.Module()
         std_of_means = torch.zeros( (128,), dtype= torch.bfloat16)
 
-        self.per_channel_statistics.register_buffer("std-of-means", std_of_means)
-        self.per_channel_statistics.register_buffer(
-            "mean-of-means",
+        # self.per_channel_statistics.register_buffer("std-of-means", std_of_means)
+        # self.per_channel_statistics.register_buffer(
+        #     "mean-of-means",
+        #         torch.zeros_like(std_of_means)
+        # )
+        
+        self.register_buffer("std_of_means", std_of_means)
+        self.register_buffer(
+            "mean_of_means",
                 torch.zeros_like(std_of_means)
         )
-        
 
 
         # pass init params to Encoder

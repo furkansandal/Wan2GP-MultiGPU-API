@@ -20,6 +20,21 @@ WanGP supports the Wan (and derived models), Hunyuan Video and LTV Video models 
 **Follow DeepBeepMeep on Twitter/X to get the Latest News**: https://x.com/deepbeepmeep
 
 ## 🔥 Latest Updates
+### July 21 2025: WanGP v7.12
+- Flux Family Reunion : *Flux Dev* and *Flux Schnell* have been invited aboard WanGP. To celebrate that, Loras support for the Flux *diffusers* format has also been added.
+
+- LTX Video upgraded to version 0.9.8: you can now generate 1800 frames (1 min of video !) in one go without a sliding window. With the distilled model it will take only 5 minutes with a RTX 4090 (you will need 22 GB of VRAM though). I have added options to select higher humber frames if you want to experiment
+
+- LTX Video ControlNet : it is a Control Net that allows you for instance to transfer a Human motion or Depth from a control video. It is not as powerful as Vace but can produce interesting things especially as now you can generate quickly a 1 min video. Under the scene IC-Loras (see below) for Pose, Depth and Canny are automatically loaded for you, no need to add them. 
+
+- LTX IC-Lora support: these are special Loras that consumes a conditional image or video
+Beside the pose, depth and canny IC-Loras transparently loaded there is the *detailer* (https://huggingface.co/Lightricks/LTX-Video-ICLoRA-detailer-13b-0.9.8) which is basically an upsampler. Add the *detailer* as a Lora and use LTX Raw Format as control net choice to use it.
+
+- Matanyone is now also for the GPU Poor as its VRAM requirements have been divided by 2! (7.12 shadow update)
+
+- Easier way to select video resolution 
+
+
 ### July 15 2025: WanGP v7.0 is an AI Powered Photoshop
 This release turns the Wan models into Image Generators. This goes way more than allowing to generate a video made of single frame :
 - Multiple Images generated at the same time so that you can choose the one you like best.It is Highly VRAM optimized so that you can generate for instance 4 720p Images at the same time with less than 10 GB
@@ -86,84 +101,6 @@ Taking care of your life is not enough, you want new stuff to play with ?
 
 **If you had upgraded to v6.5 please upgrade again to 6.5.1 as this will fix a bug that ignored Loras beyond the first one**
 
-### June 23 2025: WanGP v6.3, Vace Unleashed. Thought we couldnt squeeze Vace even more ?
-- Multithreaded preprocessing when possible for faster generations
-- Multithreaded frames Lanczos Upsampling as a bonus
-- A new Vace preprocessor : *Flow* to extract fluid motion
-- Multi Vace Controlnets: you can now transfer several properties at the same time. This opens new possibilities to explore, for instance if you transfer *Human Movement* and *Shapes* at the same time for some reasons the lighting of your character will take into account much more the environment of your character.
-- Injected Frames Outpainting, in case you missed it in WanGP 6.21
-
-Don't know how to use all of the Vace features ? Check the Vace Guide embedded in WanGP as it has also been updated.
-
-
-### June 19 2025: WanGP v6.2, Vace even more Powercharged
-👋 Have I told you that I am a big fan of Vace ? Here are more goodies to unleash its power: 
-- If you ever wanted to watch Star Wars in 4:3, just use the new *Outpainting* feature and it will add the missing bits of image at the top and the bottom of the screen. The best thing is *Outpainting* can be combined with all the other Vace modifications, for instance you can change the main character of your favorite movie at the same time  
-- More processing can combined at the same time  (for instance the depth process can be applied outside the mask)
-- Upgraded the depth extractor to Depth Anything 2 which is much more detailed
-
-As a bonus, I have added two finetunes based on the Safe-Forcing technology (which requires only 4 steps to generate a video): Wan 2.1 text2video Self-Forcing and Vace Self-Forcing. I know there is Lora around but the quality of the Lora is worse (at least with Vace) compared to the full model. Don't hesitate to share your opinion about this on the discord server. 
-### June 17 2025: WanGP v6.1, Vace Powercharged
-👋 Lots of improvements for Vace the Mother of all Models:
-- masks can now be combined with on the fly processing of a control video, for instance you can extract the motion of a specific person defined by a mask
-- on the fly modification of masks : reversed masks (with the same mask you can modify the background instead of the people covered by the masks), enlarged masks (you can cover more area if for instance the person you are trying to inject is larger than the one in the mask), ...
-- view these modified masks directly inside WanGP during the video generation to check they are really as expected
-- multiple frames injections: multiples frames can be injected at any location of the video
-- expand past videos in on click: just select one generated video to expand it
-
-Of course all these new stuff work on all Vace finetunes (including Vace Fusionix).
-
-Thanks also to Reevoy24 for adding a Notfication sound at the end of a generation and for fixing the background color of the current generation summary.
-
-### June 12 2025: WanGP v6.0
-👋 *Finetune models*: You find the 20 models supported by WanGP not sufficient ? Too impatient to wait for the next release to get the support for a newly released model ? Your prayers have been answered: if a new model is compatible with a model architecture supported by WanGP, you can add by yourself the support for this model in WanGP by just creating a finetune model definition. You can then store this model in the cloud (for instance in Huggingface) and the very light finetune definition file can be easily shared with other users. WanGP will download automatically the finetuned model for them.
-
-To celebrate the new finetunes support, here are a few finetune gifts (directly accessible from the model selection menu):
-- *Fast Hunyuan Video* : generate model t2v in only 6 steps
-- *Hunyuan Vido AccVideo* : generate model t2v in only 5 steps
-- *Wan FusioniX*: it is a combo of AccVideo / CausVid ans other models and can generate high quality Wan videos in only 8 steps
-
-One more thing...
-
-The new finetune system can be used to combine complementaty models : what happens when you combine  Fusionix Text2Video and Vace Control Net ?
-
-You get **Vace FusioniX**: the Ultimate Vace Model, Fast (10 steps, no need for guidance) and with a much better quality Video than the original slower model (despite being the best Control Net out there). Here goes one more finetune...
-
-Check the *Finetune Guide* to create finetune models definitions and share them on the WanGP discord server.
-
-### June 11 2025: WanGP v5.5
-👋 *Hunyuan Video Custom Audio*: it is similar to Hunyuan Video Avatar except there isn't any lower limit on the number of frames and you can use your reference images in a different context than the image itself\
-*Hunyuan Video Custom Edit*: Hunyuan Video Controlnet, use it to do inpainting and replace a person in a video while still keeping his poses. Similar to Vace but less restricted than the Wan models in terms of content...
-
-
-### June 6 2025: WanGP v5.41
-👋 Bonus release: Support for **AccVideo** Lora to speed up x2 Video generations in Wan models. Check the Loras documentation to get the usage instructions of AccVideo.\
-You will need to do a *pip install -r requirements.txt*
-
-### June 6 2025: WanGP v5.4
-👋 World Exclusive : **Hunyuan Video Avatar** Support ! You won't need 80 GB of VRAM nor 32 GB oF VRAM, just 10 GB of VRAM will be sufficient to generate up to 15s of high quality speech / song driven Video at a high speed with no quality degradation. Support for TeaCache included.\
-Here is a link to the original repo where you will find some very interesting documentation and examples. https://github.com/Tencent-Hunyuan/HunyuanVideo-Avatar. Kudos to the Hunyuan Video Avatar team for the best model of its kind.\
-Also many thanks to Reevoy24 for his repackaging / completing the documentation
-
-### May 28 2025: WanGP v5.31
-👋 Added **Phantom 14B**, a model that you can use to transfer objects / people in the video. My preference goes to Vace that remains the king of controlnets.
-VACE improvements: Better sliding window transitions, image mask support in Matanyone, new Extend Video feature, and enhanced background removal options.
-
-### May 26, 2025: WanGP v5.3
-👋 Settings management revolution! Now you can:
-- Select any generated video and click *Use Selected Video Settings* to instantly reuse its configuration
-- Drag & drop videos to automatically extract their settings metadata
-- Export/import settings as JSON files for easy sharing and backup
-
-### May 20, 2025: WanGP v5.2
-👋 **CausVid support** - Generate videos in just 4-12 steps with the new distilled Wan model! Also added experimental MoviiGen for 1080p generation (20GB+ VRAM required). Check the Loras documentation to get the usage instructions of CausVid.
-
-### May 18, 2025: WanGP v5.1
-👋 **LTX Video 13B Distilled** - Generate high-quality videos in less than one minute!
-
-### May 17, 2025: WanGP v5.0
-👋 **One App to Rule Them All!** Added Hunyuan Video and LTX Video support, plus Vace 14B and integrated prompt enhancer.
-
 See full changelog: **[Changelog](docs/CHANGELOG.md)**
 
 ## 📋 Table of Contents
@@ -202,6 +139,7 @@ git pull
 pip install -r requirements.txt
 ```
 
+
 ## 📦 Installation
 
 For detailed installation instructions for different GPU generations:
@@ -223,6 +161,12 @@ For detailed installation instructions for different GPU generations:
 
 - **[Changelog](docs/CHANGELOG.md)** - Latest updates and version history
 - **[Troubleshooting](docs/TROUBLESHOOTING.md)** - Common issues and solutions
+
+## 📚 Video Guides
+- Nice Video that explain how to use Vace:\
+https://www.youtube.com/watch?v=FMo9oN2EAvE
+- Another Vace guide:\
+https://www.youtube.com/watch?v=T5jNiEhf9xk
 
 ## 🔗 Related Projects
 

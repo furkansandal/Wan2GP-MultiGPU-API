@@ -446,3 +446,6 @@ class DTT2V:
             videos = videos[0] # return only first video     
 
         return videos
+
+def query_model_def(model_type, model_def):
+    return None

@@ -28,10 +28,6 @@ def get_linear_split_map():
                                 "linear1" : {"mapped_modules" : ["linear1_attn_q", "linear1_attn_k", "linear1_attn_v", "linear1_mlp"] , "split_sizes":  [hidden_size, hidden_size, hidden_size, 7*hidden_size- 3*hidden_size]}
                                 }
     return split_linear_modules_map
-try:
-    from xformers.ops.fmha.attn_bias import BlockDiagonalPaddedKeysMask
-except ImportError:
-    BlockDiagonalPaddedKeysMask = None
 
 
 class MMDoubleStreamBlock(nn.Module):
@@ -469,7 +465,7 @@ class MMSingleStreamBlock(nn.Module):
         del img_mod, txt_mod
         x_mod_shape = x_mod.shape
         x_mod = x_mod.view(-1, x_mod.shape[-1])
-        chunk_size = int(x_mod_shape[1]/6)
+        chunk_size = int(x_mod.shape[0]/6)
         x_chunks = torch.split(x_mod, chunk_size)
         attn = attn.view(-1, attn.shape[-1])
         attn_chunks =torch.split(attn, chunk_size)

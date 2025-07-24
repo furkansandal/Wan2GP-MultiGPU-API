@@ -6,7 +6,7 @@
 		"image_outputs": true,
         "URLs": "t2v"
     },
-    "video_length": 1,
+    "batch_size": 1,
     "resolution": "1280x720"	
 }
 

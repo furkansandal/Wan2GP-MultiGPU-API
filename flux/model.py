@@ -85,18 +85,67 @@ class Flux(nn.Module):
         new_sd = {}
         if len(sd) == 0: return sd
 
+        def swap_scale_shift(weight):
+            shift, scale = weight.chunk(2, dim=0)
+            new_weight = torch.cat([scale, shift], dim=0)
+            return new_weight
+
         first_key= next(iter(sd))
-        if first_key.startswith("transformer."):
-            src_list = [".attn.to_q.", ".attn.to_k.", ".attn.to_v."]
-            tgt_list = [".linear1_attn_q.", ".linear1_attn_k.", ".linear1_attn_v."]
+        if first_key.startswith("lora_unet_"):
+            new_sd = {}
+            print("Converting Lora Safetensors format to Lora Diffusers format")
+            repl_list = ["linear1", "linear2", "modulation_lin"]
+            src_list = ["_" + k + "." for k in repl_list]
+            tgt_list = ["." + k.replace("_", ".") + "." for k in repl_list]
+
             for k,v in sd.items():
-                k = k.replace("transformer.single_transformer_blocks", "diffusion_model.single_blocks")
-                k = k.replace("transformer.double_transformer_blocks", "diffusion_model.double_blocks")
-                for src, tgt in zip(src_list, tgt_list):
-                    k = k.replace(src, tgt)
+                k = k.replace("lora_unet_blocks_","diffusion_model.blocks.")
+                k = k.replace("lora_unet__blocks_","diffusion_model.blocks.")
+                k = k.replace("lora_unet_single_blocks_","diffusion_model.single_blocks.")
+
+                for s,t in zip(src_list, tgt_list):
+                    k = k.replace(s,t)
+
+                k = k.replace("lora_up","lora_B")
+                k = k.replace("lora_down","lora_A")
 
                 new_sd[k] = v
-            
+
+        elif first_key.startswith("transformer."):
+            root_src = ["time_text_embed.timestep_embedder.linear_1", "time_text_embed.timestep_embedder.linear_2", "time_text_embed.text_embedder.linear_1", "time_text_embed.text_embedder.linear_2",
+                    "time_text_embed.guidance_embedder.linear_1", "time_text_embed.guidance_embedder.linear_2",
+                    "x_embedder", "context_embedder", "proj_out" ]
+
+            root_tgt = ["time_in.in_layer", "time_in.out_layer", "vector_in.in_layer", "vector_in.out_layer",
+                    "guidance_in.in_layer", "guidance_in.out_layer",
+                    "img_in", "txt_in", "final_layer.linear" ]
+
+            double_src = ["norm1.linear", "norm1_context.linear", "attn.norm_q",  "attn.norm_k", "ff.net.0.proj", "ff.net.2", "ff_context.net.0.proj", "ff_context.net.2", "attn.to_out.0" ,"attn.to_add_out", "attn.to_out", ".attn.to_", ".attn.add_q_proj.", ".attn.add_k_proj.", ".attn.add_v_proj.",  ] 
+            double_tgt = ["img_mod.lin", "txt_mod.lin", "img_attn.norm.query_norm", "img_attn.norm.key_norm", "img_mlp.0", "img_mlp.2", "txt_mlp.0", "txt_mlp.2", "img_attn.proj", "txt_attn.proj", "img_attn.proj", ".img_attn.", ".txt_attn.q.", ".txt_attn.k.", ".txt_attn.v."] 
+
+            single_src = ["norm.linear", "attn.norm_q", "attn.norm_k", "proj_out",".attn.to_q.", ".attn.to_k.", ".attn.to_v.", ".proj_mlp."]
+            single_tgt = ["modulation.lin","norm.query_norm", "norm.key_norm", "linear2", ".linear1_attn_q.", ".linear1_attn_k.", ".linear1_attn_v.", ".linear1_mlp."]
+
+
+            for k,v in sd.items():
+                if k.startswith("transformer.single_transformer_blocks"):
+                    k = k.replace("transformer.single_transformer_blocks", "diffusion_model.single_blocks")
+                    for src, tgt in zip(single_src, single_tgt):
+                        k = k.replace(src, tgt)
+                elif k.startswith("transformer.transformer_blocks"):
+                    k = k.replace("transformer.transformer_blocks", "diffusion_model.double_blocks")
+                    for src, tgt in zip(double_src, double_tgt):
+                        k = k.replace(src, tgt)
+                else:
+                    k = k.replace("transformer.", "diffusion_model.")
+                    for src, tgt in zip(root_src, root_tgt):
+                        k = k.replace(src, tgt)
+
+                    if "norm_out.linear" in k:
+                        if "lora_B" in k:
+                            v = swap_scale_shift(v)
+                        k = k.replace("norm_out.linear", "final_layer.adaLN_modulation.1")            
+                new_sd[k] = v
         return new_sd    
 
     def forward(

@@ -149,6 +149,7 @@ class LTXV:
         self,
         model_filepath: str,
         text_encoder_filepath: str,
+        model_type, base_model_type,
         model_def,
         dtype = torch.bfloat16,
         VAE_dtype = torch.bfloat16, 
@@ -159,24 +160,31 @@ class LTXV:
         dtype  = torch.bfloat16
         self.mixed_precision_transformer = mixed_precision_transformer
         self.model_def = model_def
-        self.pipeline_config = model_def["LTXV_config"]        
+        self.model_type = model_type
+        self.pipeline_config = model_def["LTXV_config"]
+        # ckpt_path ="c:/temp/ltxv-13b-0.9.8-dev.safetensors"
         # with safe_open(ckpt_path, framework="pt") as f:
         #     metadata = f.metadata()
         #     config_str = metadata.get("config")
         #     configs = json.loads(config_str)
-        #     allowed_inference_steps = configs.get("allowed_inference_steps", None)
+        #     allowed_inference_steps = configs.get("allowed_inference_steps", None)        
+        # with open("c:/temp/ltxv_config.json", "w", encoding="utf-8") as writer:
+        #     writer.write(json.dumps(configs["transformer"]))
+        # with open("c:/temp/vae_config.json", "w", encoding="utf-8") as writer:
+        #     writer.write(json.dumps(configs["vae"])) 
         # transformer = Transformer3DModel.from_pretrained(ckpt_path)
-        # transformer = offload.fast_load_transformers_model("c:/temp/ltxdistilled/diffusion_pytorch_model-00001-of-00006.safetensors",  forcedConfigPath="c:/temp/ltxdistilled/config.json")
-
+        # offload.save_model(transformer, "ckpts/ltxv_0.9.8_13B_bf16.safetensors", config_file_path= "c:/temp/ltxv_config.json")
+        # offload.save_model(transformer, "ckpts/ltxv_0.9.8_13B_quanto_bf16_int8.safetensors", do_quantize= True, config_file_path= "c:/temp/ltxv_config.json")
+        
         # vae = CausalVideoAutoencoder.from_pretrained(ckpt_path)
         vae = offload.fast_load_transformers_model("ckpts/ltxv_0.9.7_VAE.safetensors", modelClass=CausalVideoAutoencoder)
+        # vae = offload.fast_load_transformers_model("ckpts/ltxv_0.9.8_VAE.safetensors", modelClass=CausalVideoAutoencoder)
         # if VAE_dtype == torch.float16:
         VAE_dtype = torch.bfloat16
 
         vae = vae.to(VAE_dtype)
         vae._model_dtype = VAE_dtype
-        # vae = offload.fast_load_transformers_model("vae.safetensors", modelClass=CausalVideoAutoencoder, modelPrefix= "vae",  forcedConfigPath="config_vae.json")
-        # offload.save_model(vae, "vae.safetensors", config_file_path="config_vae.json")
+        # offload.save_model(vae, "vae.safetensors", config_file_path="c:/temp/config_vae.json")
 
         # model_filepath = "c:/temp/ltxd/ltxv-13b-0.9.7-distilled.safetensors"
         transformer = offload.fast_load_transformers_model(model_filepath, modelClass=Transformer3DModel) 
@@ -193,6 +201,7 @@ class LTXV:
         # offload.save_model(transformer, "ltx_13B_quanto_bf16_int8.safetensors", do_quantize= True, config_file_path="config_transformer.json")
 
         latent_upsampler = LatentUpsampler.from_pretrained("ckpts/ltxv_0.9.7_spatial_upscaler.safetensors").to("cpu").eval()
+        # latent_upsampler = LatentUpsampler.from_pretrained("ckpts/ltxv_0.9.8_spatial_upscaler.safetensors").to("cpu").eval()
         latent_upsampler.to(VAE_dtype)
         latent_upsampler._model_dtype = VAE_dtype
 
@@ -259,6 +268,7 @@ class LTXV:
         image_start = None,
         image_end = None,
         input_video = None,
+        input_frames = None,
         sampling_steps = 50,
         image_cond_noise_scale:  float = 0.15,
         input_media_path: Optional[str] = None,
@@ -272,6 +282,7 @@ class LTXV:
         callback=None,
         device: Optional[str] = None,
         VAE_tile_size = None,
+        apg_switch = 0,
         **kwargs,
     ):
 
@@ -280,21 +291,33 @@ class LTXV:
         conditioning_strengths  = None
         conditioning_media_paths = []
         conditioning_start_frames = []
-
-
+        conditioning_control_frames = []
+        prefix_size = 0
         if input_video != None:
             conditioning_media_paths.append(input_video) 
             conditioning_start_frames.append(0)
-            height, width = input_video.shape[-2:]
+            conditioning_control_frames.append(False)
+            prefix_size, height, width = input_video.shape[-3:]
         else:
             if image_start != None:
                 frame_width, frame_height  = image_start.size
-                height, width = calculate_new_dimensions(height, width, frame_height, frame_width, fit_into_canvas, 32)
+                if fit_into_canvas != None:
+                    height, width = calculate_new_dimensions(height, width, frame_height, frame_width, fit_into_canvas, 32)
                 conditioning_media_paths.append(image_start) 
                 conditioning_start_frames.append(0)
+                conditioning_control_frames.append(False)
+                prefix_size = 1
             if image_end != None:
                 conditioning_media_paths.append(image_end) 
                 conditioning_start_frames.append(frame_num-1)
+                conditioning_control_frames.append(False)
+
+        if input_frames!= None:
+            conditioning_media_paths.append(input_frames) 
+            conditioning_start_frames.append(prefix_size)
+            conditioning_control_frames.append(True)
+            height, width = input_frames.shape[-2:]
+            fit_into_canvas = None
 
         if len(conditioning_media_paths) == 0:
             conditioning_media_paths = None
@@ -380,6 +403,7 @@ class LTXV:
                 conditioning_media_paths=conditioning_media_paths,
                 conditioning_strengths=conditioning_strengths,
                 conditioning_start_frames=conditioning_start_frames,
+                conditioning_control_frames=conditioning_control_frames,
                 height=height,
                 width=width,
                 num_frames=frame_num,
@@ -435,6 +459,7 @@ class LTXV:
             mixed_precision=pipeline_config.get("mixed", self.mixed_precision_transformer),
             callback=callback,
             VAE_tile_size = VAE_tile_size,
+            apg_switch = apg_switch, 
             device=device,
             # enhance_prompt=enhance_prompt,
         )
@@ -453,11 +478,29 @@ class LTXV:
         images = images.sub_(0.5).mul_(2).squeeze(0)
         return images
 
+    def get_loras_transformer(self, get_model_recursive_prop, video_prompt_type, **kwargs):
+        map = {
+            "P" : "pose",
+            "D" : "depth",
+            "E" : "canny",
+        }
+        loras = []
+        preloadURLs = get_model_recursive_prop(self.model_type,  "preload_URLs")
+        lora_file_name = ""
+        for letter, signature in map.items():
+            if letter in video_prompt_type:
+                for file_name in preloadURLs:
+                    if signature in file_name:
+                        loras += [ os.path.join("ckpts", os.path.basename(file_name))]
+                        break
+        loras_mult = [1.] * len(loras)
+        return loras, loras_mult 
 
 def prepare_conditioning(
     conditioning_media_paths: List[str],
     conditioning_strengths: List[float],
     conditioning_start_frames: List[int],
+    conditioning_control_frames: List[int],
     height: int,
     width: int,
     num_frames: int,
@@ -480,8 +523,8 @@ def prepare_conditioning(
         A list of ConditioningItem objects.
     """
     conditioning_items = []
-    for path, strength, start_frame in zip(
-        conditioning_media_paths, conditioning_strengths, conditioning_start_frames
+    for path, strength, start_frame, conditioning_control_frames in zip(
+        conditioning_media_paths, conditioning_strengths, conditioning_start_frames, conditioning_control_frames
     ):
         if isinstance(path, Image.Image):
             num_input_frames = orig_num_input_frames =  1
@@ -506,7 +549,7 @@ def prepare_conditioning(
             padding=padding,
             just_crop=True,
         )
-        conditioning_items.append(ConditioningItem(media_tensor, start_frame, strength))
+        conditioning_items.append(ConditioningItem(media_tensor, start_frame, strength, conditioning_control_frames))
     return conditioning_items
 
 
@@ -561,3 +604,16 @@ def load_media_file(
         raise Exception("video format not supported")
     return media_tensor
 
+def query_model_def(model_type, model_def):
+    LTXV_config = model_def.get("LTXV_config", "")
+    distilled= "distilled" in LTXV_config 
+    model_def_output = {
+		"no_guidance": True,		
+    }
+    if distilled:
+        model_def_output.update({
+		"lock_inference_steps": True,
+        "no_negative_prompt" : True,
+    })
+        
+    return model_def_output

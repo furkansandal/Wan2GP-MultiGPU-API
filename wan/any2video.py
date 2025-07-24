@@ -31,6 +31,7 @@ from .utils.vace_preprocessor import VaceVideoProcessor
 from wan.utils.basic_flowmatch import FlowMatchScheduler
 from wan.utils.utils import get_outpainting_frame_location, resize_lanczos, calculate_new_dimensions
 from .multitalk.multitalk_utils import MomentumBuffer, adaptive_projected_guidance
+from mmgp import safetensors2
 
 def optimized_scale(positive_flat, negative_flat):
 
@@ -101,14 +102,13 @@ class WanAny2V:
             vae_pth=os.path.join(checkpoint_dir, config.vae_checkpoint), dtype= VAE_dtype,
             device=self.device)
         
-        # xmodel_filename = "c:/ml/multitalk/multitalk.safetensors"
-        # config_filename= "configs/multitalk.json"
+        xmodel_filename = "c:/temp/wan2.1_text2video_1.3B_bf16.safetensors"
+        # config_filename= "configs/t2v_1.3B.json"
         # import json
         # with open(config_filename, 'r', encoding='utf-8') as f:
         #     config = json.load(f)
-        # from mmgp import safetensors2
         # sd = safetensors2.torch_load_file(xmodel_filename)
-        # model_filename = "c:/temp/flf/diffusion_pytorch_model-00001-of-00007.safetensors"
+        # model_filename = "c:/temp/vace1_3B.safetensors"
         base_config_file = f"configs/{base_model_type}.json"
         forcedConfigPath = base_config_file if len(model_filename) > 1 else None
         # forcedConfigPath = base_config_file = f"configs/flf2v_720p.json"
@@ -118,12 +118,7 @@ class WanAny2V:
         # offload.load_model_data(self.model, "c:/temp/Phantom-Wan-1.3B.pth")
         self.model.lock_layers_dtypes(torch.float32 if mixed_precision_transformer else dtype)
         offload.change_dtype(self.model, dtype, True)
-        # offload.save_model(self.model, "flf2v_720p.safetensors", config_file_path=base_config_file)
-        # offload.save_model(self.model, "flf2v_quanto_int8_fp16_720p.safetensors", do_quantize= True, config_file_path=base_config_file)
-        # offload.save_model(self.model, "multitalk_quanto_fp16.safetensors", do_quantize= True, config_file_path=base_config_file, filter_sd=sd)
-
-        # offload.save_model(self.model, "wan2.1_selforcing_fp16.safetensors", config_file_path=base_config_file)
-        # offload.save_model(self.model, "wan2.1_text2video_14B_mbf16.safetensors", config_file_path=base_config_file)
+        # offload.save_model(self.model, "wan2.1_text2video_1.3B_mbf16.safetensors", do_quantize= False, config_file_path=base_config_file, filter_sd=sd)
         # offload.save_model(self.model, "wan2.1_text2video_14B_quanto_mfp16_int8.safetensors", do_quantize=True, config_file_path=base_config_file)
         self.model.eval().requires_grad_(False)
         if save_quantized:
@@ -867,3 +862,6 @@ class WanAny2V:
             target = modules_dict[f"blocks.{model_layer}"]
             setattr(target, "vace", module )
         delattr(model, "vace_blocks")
+
+def query_model_def(model_type, model_def):
+    return None

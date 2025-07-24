@@ -1065,3 +1065,7 @@ class HunyuanVideoSampler(Inference):
         samples = samples.squeeze(0)
 
         return samples
+
+
+def query_model_def(model_type, model_def):
+    return None

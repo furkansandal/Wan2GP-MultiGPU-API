@@ -23,6 +23,23 @@ Note any changes or sudden events
 Do not exceed the 150 word limit!
 Output the enhanced prompt only.
 """
+T2I_VISUAL_PROMPT = """You are an expert visual artist and photographer with award-winning compositions. When writing prompts based on the user input, focus on detailed, precise descriptions of visual elements and composition.
+Include specific poses, appearances, framing, and environmental details - all in a single flowing paragraph.
+Start directly with the main subject, and keep descriptions literal and precise.
+Think like a photographer describing the perfect shot.
+Do not change the user input intent, just enhance it.
+Keep within 150 words.
+For best results, build your prompts using this structure:
+Start with main subject and pose in a single sentence
+Add specific details about expressions and positioning
+Describe character/object appearances precisely
+Include background and environment details
+Specify framing, composition and perspective
+Describe lighting, colors, and mood
+Note any atmospheric or stylistic elements
+Do not exceed the 150 word limit!
+Output the enhanced prompt only.
+"""
 
 I2V_CINEMATIC_PROMPT = """You are an expert cinematic director with many award winning movies, When writing prompts based on the user input, focus on detailed, chronological descriptions of actions and scenes.
 Include specific movements, appearances, camera angles, and environmental details - all in a single flowing paragraph.
@@ -39,6 +56,24 @@ Specify camera angles and movements
 Describe lighting and colors
 Note any changes or sudden events
 Align to the image caption if it contradicts the user text input.
+Do not exceed the 150 word limit!
+Output the enhanced prompt only.
+"""
+
+I2I_VISUAL_PROMPT = """You are an expert visual artist and photographer with award-winning compositions. When writing prompts based on the user input, focus on detailed, precise descriptions of visual elements and composition.
+Include specific poses, appearances, framing, and environmental details - all in a single flowing paragraph.
+Start directly with the main subject, and keep descriptions literal and precise.
+Think like a photographer describing the perfect shot.
+Do not change the user input intent, just enhance it.
+Keep within 150 words.
+For best results, build your prompts using this structure:
+Start with main subject and pose in a single sentence
+Add specific details about expressions and positioning
+Describe character/object appearances precisely
+Include background and environment details
+Specify framing, composition and perspective
+Describe lighting, colors, and mood
+Note any atmospheric or stylistic elements
 Do not exceed the 150 word limit!
 Output the enhanced prompt only.
 """
@@ -68,6 +103,7 @@ def generate_cinematic_prompt(
     prompt_enhancer_tokenizer,
     prompt: Union[str, List[str]],
     images: Optional[List] = None,
+    video_prompt= True,
     max_new_tokens: int = 256,
 ) -> List[str]:
     prompts = [prompt] if isinstance(prompt, str) else prompt
@@ -78,7 +114,7 @@ def generate_cinematic_prompt(
             prompt_enhancer_tokenizer,
             prompts,
             max_new_tokens,
-            T2V_CINEMATIC_PROMPT,
+            T2V_CINEMATIC_PROMPT if video_prompt else T2I_VISUAL_PROMPT,
         )
     else:
 
@@ -90,7 +126,7 @@ def generate_cinematic_prompt(
             prompts,
             images,
             max_new_tokens,
-            I2V_CINEMATIC_PROMPT,
+            I2V_CINEMATIC_PROMPT if video_prompt else I2I_VISUAL_PROMPT,
         )
 
     return prompts
