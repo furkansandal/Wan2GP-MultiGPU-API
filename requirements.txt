@@ -45,6 +45,7 @@ misaki
 soundfile
 ffmpeg-python
 pyannote.audio
+pynvml
 # num2words
 # spacy
 fastapi==0.115.6

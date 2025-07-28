@@ -1,7 +1,7 @@
 {
 	"model":
 	{
-		"name": "Wan2.1 text2video FusioniX 14B",
+		"name": "Wan2.1 Text2video FusioniX 14B",
 		"architecture" : "t2v",
 		"description": "A powerful merged text-to-video model based on the original WAN 2.1 T2V model, enhanced using multiple open-source components and LoRAs to boost motion realism, temporal consistency, and expressive detail.",
 		"URLs": [

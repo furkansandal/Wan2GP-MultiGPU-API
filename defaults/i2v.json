@@ -1,7 +1,7 @@
 {
 	"model":
 	{
-		"name": "Wan2.1 image2video 480p 14B",
+		"name": "Wan2.1 Image2video 480p 14B",
 		"architecture" : "i2v",
 		"description": "The standard Wan Image 2 Video specialized to generate 480p images. It also offers Start and End Image support (End Image is not supported in the original model but seems to work well)",
 		"URLs": [

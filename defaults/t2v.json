@@ -1,7 +1,7 @@
 {
 	"model":
 	{
-		"name": "Wan2.1 text2video 14B",
+		"name": "Wan2.1 Text2video 14B",
 		"architecture" : "t2v",
 		"description": "The original Wan Text 2 Video model. Most other models have been built on top of it",
 		"URLs": [

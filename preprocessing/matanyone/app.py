@@ -709,13 +709,10 @@ def export_image_mask(image_input, image_mask):
     return Image.fromarray(image_input), image_mask
 
 
-def export_to_current_video_engine(model_type, foreground_video_output, alpha_video_output):
+def export_to_current_video_engine( foreground_video_output, alpha_video_output):
     gr.Info("Original Video and Full Mask have been transferred")
     # return "MV#" + str(time.time()), foreground_video_output, alpha_video_output
-    if "custom_edit" in model_type and False:
-        return gr.update(), alpha_video_output
-    else:
-        return foreground_video_output, alpha_video_output
+    return foreground_video_output, alpha_video_output
 
 
 def teleport_to_video_tab(tab_state):
@@ -724,7 +721,7 @@ def teleport_to_video_tab(tab_state):
     return gr.Tabs(selected="video_gen")
 
 
-def display(tabs, tab_state, model_choice, vace_video_input, vace_image_input, vace_video_mask, vace_image_mask, vace_image_refs):
+def display(tabs, tab_state, vace_video_input, vace_image_input, vace_video_mask, vace_image_mask, vace_image_refs):
     # my_tab.select(fn=load_unload_models, inputs=[], outputs=[])
 
     media_url = "https://github.com/pq-yang/MatAnyone/releases/download/media/"
@@ -866,7 +863,7 @@ def display(tabs, tab_state, model_choice, vace_video_input, vace_image_input, v
                             with gr.Row(visible= True):
                                 export_to_current_video_engine_btn = gr.Button("Export to Control Video Input and Video Mask Input", visible= False)
                                     
-                export_to_current_video_engine_btn.click(  fn=export_to_current_video_engine, inputs= [model_choice, foreground_video_output, alpha_video_output], outputs= [vace_video_input, vace_video_mask]).then( #video_prompt_video_guide_trigger, 
+                export_to_current_video_engine_btn.click(  fn=export_to_current_video_engine, inputs= [foreground_video_output, alpha_video_output], outputs= [vace_video_input, vace_video_mask]).then( #video_prompt_video_guide_trigger, 
                     fn=teleport_to_video_tab, inputs= [tab_state], outputs= [tabs])
 
 

@@ -94,17 +94,20 @@ class Flux(nn.Module):
         if first_key.startswith("lora_unet_"):
             new_sd = {}
             print("Converting Lora Safetensors format to Lora Diffusers format")
-            repl_list = ["linear1", "linear2", "modulation_lin"]
+            repl_list = ["linear1", "linear2", "modulation", "img_attn", "txt_attn", "img_mlp", "txt_mlp", "img_mod", "txt_mod"]
             src_list = ["_" + k + "." for k in repl_list]
-            tgt_list = ["." + k.replace("_", ".") + "." for k in repl_list]
+            src_list2 = ["_" + k + "_" for k in repl_list]
+            tgt_list = ["." + k + "." for k in repl_list]
 
             for k,v in sd.items():
                 k = k.replace("lora_unet_blocks_","diffusion_model.blocks.")
                 k = k.replace("lora_unet__blocks_","diffusion_model.blocks.")
                 k = k.replace("lora_unet_single_blocks_","diffusion_model.single_blocks.")
+                k = k.replace("lora_unet_double_blocks_","diffusion_model.double_blocks.")
 
-                for s,t in zip(src_list, tgt_list):
+                for s,s2, t in zip(src_list, src_list2, tgt_list):
                     k = k.replace(s,t)
+                    k = k.replace(s2,t)
 
                 k = k.replace("lora_up","lora_B")
                 k = k.replace("lora_down","lora_A")

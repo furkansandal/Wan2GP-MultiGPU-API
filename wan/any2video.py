@@ -30,7 +30,7 @@ from wan.modules.posemb_layers import get_rotary_pos_embed
 from .utils.vace_preprocessor import VaceVideoProcessor
 from wan.utils.basic_flowmatch import FlowMatchScheduler
 from wan.utils.utils import get_outpainting_frame_location, resize_lanczos, calculate_new_dimensions
-from .multitalk.multitalk_utils import MomentumBuffer, adaptive_projected_guidance
+from .multitalk.multitalk_utils import MomentumBuffer, adaptive_projected_guidance, match_and_blend_colors, match_and_blend_colors_with_mask
 from mmgp import safetensors2
 
 def optimized_scale(positive_flat, negative_flat):
@@ -78,7 +78,6 @@ class WanAny2V:
         self.num_train_timesteps = config.num_train_timesteps
         self.param_dtype = config.param_dtype
         self.model_def = model_def
-        self.image_outputs = model_def.get("image_outputs", False)
         self.text_encoder = T5EncoderModel(
             text_len=config.text_len,
             dtype=config.t5_dtype,
@@ -382,6 +381,9 @@ class WanAny2V:
         offloadobj = None,
         apg_switch = False,
         speakers_bboxes = None,
+        color_correction_strength = 1,
+        prefix_frames_count = 0,
+        image_mode = 0,
         **bbargs
                 ):
         
@@ -418,9 +420,9 @@ class WanAny2V:
 
         seed_g = torch.Generator(device=self.device)
         seed_g.manual_seed(seed)
-
+        image_outputs = image_mode == 1
         kwargs = {'pipeline': self, 'callback': callback}
-
+        color_reference_frame = None
         if self._interrupt:
             return None
         
@@ -468,6 +470,7 @@ class WanAny2V:
                 enc =  torch.concat( [input_frames, torch.zeros( (3, frame_num-preframes_count, height, width), 
                                      device=self.device, dtype= self.VAE_dtype)], 
                                      dim = 1).to(self.device)
+                color_reference_frame = input_frames[:, -1:].clone()
                 input_frames = None
             else:
                 preframes_count = 1
@@ -498,6 +501,7 @@ class WanAny2V:
                 img_interpolated = resize_lanczos(image_start, h, w).sub_(0.5).div_(0.5).unsqueeze(0).transpose(0,1).to(self.device) #, self.dtype
                 image_start = resize_lanczos(image_start, clip_image_size, clip_image_size)
                 image_start = image_start.sub_(0.5).div_(0.5).to(self.device) #, self.dtype
+                color_reference_frame = image_start.clone()
                 if image_end!= None:
                     img_interpolated2 = resize_lanczos(image_end, h, w).sub_(0.5).div_(0.5).unsqueeze(0).transpose(0,1).to(self.device) #, self.dtype
                     image_end = resize_lanczos(image_end, clip_image_size, clip_image_size)
@@ -566,12 +570,13 @@ class WanAny2V:
             injection_denoising_step = 0
             inject_from_start = False
             if input_frames != None and denoising_strength < 1 :
+                color_reference_frame = input_frames[:, -1:].clone()
                 if overlapped_latents != None:
-                    overlapped_latents_frames_num = overlapped_latents.shape[1]
+                    overlapped_latents_frames_num = overlapped_latents.shape[2]
                     overlapped_frames_num = (overlapped_latents_frames_num-1) * 4 + 1
                 else: 
                     overlapped_latents_frames_num = overlapped_frames_num  = 0
-                if len(keep_frames_parsed) == 0  or self.image_outputs or  (overlapped_frames_num + len(keep_frames_parsed)) == input_frames.shape[1] and all(keep_frames_parsed) : keep_frames_parsed = [] 
+                if len(keep_frames_parsed) == 0  or image_outputs or  (overlapped_frames_num + len(keep_frames_parsed)) == input_frames.shape[1] and all(keep_frames_parsed) : keep_frames_parsed = [] 
                 injection_denoising_step = int(sampling_steps * (1. - denoising_strength) )
                 latent_keep_frames = []
                 if source_latents.shape[1] < lat_frames or len(keep_frames_parsed) > 0:
@@ -606,6 +611,7 @@ class WanAny2V:
             z0 = self.vace_encode_frames(input_frames, input_ref_images, masks=input_masks, tile_size = VAE_tile_size, overlapped_latents = overlapped_latents )
             m0 = self.vace_encode_masks(input_masks, input_ref_images)
             if self.background_mask != None:
+                color_reference_frame = input_ref_images[0][0].clone()
                 zbg = self.vace_encode_frames([ref_img[0] for ref_img in input_ref_images], None, masks=self.background_mask, tile_size = VAE_tile_size )
                 mbg = self.vace_encode_masks(self.background_mask, None)
                 for zz0, mm0, zzbg, mmbg in zip(z0, m0, zbg, mbg):
@@ -621,6 +627,8 @@ class WanAny2V:
             if overlapped_latents != None :
                 overlapped_latents_size = overlapped_latents.shape[2]
                 extended_overlapped_latents = z[0][:16, :overlapped_latents_size + ref_images_count].clone().unsqueeze(0)
+            if prefix_frames_count > 0:
+                color_reference_frame = input_frames[0][:, prefix_frames_count -1:prefix_frames_count].clone()
 
             target_shape = list(z0[0].shape)
             target_shape[0] = int(target_shape[0] / 2)
@@ -691,7 +699,6 @@ class WanAny2V:
             apg_norm_threshold = 55
             text_momentumbuffer  = MomentumBuffer(apg_momentum) 
             audio_momentumbuffer = MomentumBuffer(apg_momentum) 
-        # self.image_outputs = False
         # denoising
         for i, t in enumerate(tqdm(timesteps)):
             offload.set_step_no_for_lora(self.model, i)
@@ -777,7 +784,7 @@ class WanAny2V:
                 noise_pred_cond, noise_pred_noaudio, noise_pred_uncond = ret_values
                 noise_pred = noise_pred_uncond + guide_scale * (noise_pred_noaudio - noise_pred_uncond) + audio_cfg_scale * (noise_pred_cond  - noise_pred_noaudio) 
                 noise_pred_noaudio = None
-            elif multitalk:
+            elif multitalk and audio_proj != None:
                 noise_pred_cond, noise_pred_drop_text, noise_pred_uncond = ret_values
                 if apg_switch != 0:
                     noise_pred = noise_pred_cond + (guide_scale - 1) * adaptive_projected_guidance(noise_pred_cond - noise_pred_drop_text, 
@@ -830,6 +837,7 @@ class WanAny2V:
                 latents_preview = latents
                 if vace and ref_images_count > 0: latents_preview = latents_preview[:, :, ref_images_count: ] 
                 if trim_frames > 0:  latents_preview=  latents_preview[:, :,:-trim_frames]
+                if image_outputs: latents_preview=  latents_preview[:, :,:1]
                 if len(latents_preview) > 1: latents_preview = latents_preview.transpose(0,2)
                 callback(i, latents_preview[0], False)
                 latents_preview = None
@@ -846,10 +854,18 @@ class WanAny2V:
 
         videos = self.vae.decode(x0, VAE_tile_size)
 
-        if self.image_outputs:
-            videos = torch.cat(videos, dim=1) if len(videos) > 1 else videos[0]
+        if image_outputs:
+            videos = torch.cat([video[:,:1] for video in videos], dim=1) if len(videos) > 1 else videos[0][:,:1]
         else:
-            videos = videos[0] # return only first video     
+            videos = videos[0] # return only first video
+        if color_correction_strength > 0:
+            if vace and False:
+                # videos = match_and_blend_colors_with_mask(videos.unsqueeze(0), input_frames[0].unsqueeze(0), input_masks[0][:1].unsqueeze(0), color_correction_strength,copy_mode= "progressive_blend").squeeze(0)
+                videos = match_and_blend_colors_with_mask(videos.unsqueeze(0), input_frames[0].unsqueeze(0), input_masks[0][:1].unsqueeze(0), color_correction_strength,copy_mode= "reference").squeeze(0)
+                # videos = match_and_blend_colors_with_mask(videos.unsqueeze(0), videos.unsqueeze(0), input_masks[0][:1].unsqueeze(0), color_correction_strength,copy_mode= "reference").squeeze(0)
+            elif color_reference_frame is not None:
+                videos = match_and_blend_colors(videos.unsqueeze(0), color_reference_frame.unsqueeze(0), color_correction_strength).squeeze(0)
+            
         if return_latent_slice != None:
             return { "x" : videos, "latent_slice" : latent_slice }
         return videos

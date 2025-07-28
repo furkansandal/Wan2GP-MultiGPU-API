@@ -30,6 +30,7 @@ def get_noise(
         2 * math.ceil(height / 16),
         2 * math.ceil(width / 16),
         dtype=dtype,
+        device=device,
         generator=torch.Generator(device=device).manual_seed(seed),
     )
 

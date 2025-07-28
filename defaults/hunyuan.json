@@ -1,7 +1,7 @@
 {
 	"model":
 	{
-		"name": "Hunyuan Video text2video 720p 13B",
+		"name": "Hunyuan Video Text2video 720p 13B",
 		"architecture" : "hunyuan",
 		"description": "Probably the best text 2 video model available.",
 		"URLs": [

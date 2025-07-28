@@ -1,6 +1,6 @@
 {
     "model": {
-        "name": "Wan2.1 text2video Self-Forcing 14B",
+        "name": "Wan2.1 Text2video Self-Forcing 14B",
         "architecture": "t2v",
         "description": "This model is an advanced text-to-video generation model. This approach allows the model to generate videos with significantly fewer inference steps (4 or 8 steps) and without classifier-free guidance, substantially reducing video generation time while maintaining high quality outputs.",
         "URLs": [

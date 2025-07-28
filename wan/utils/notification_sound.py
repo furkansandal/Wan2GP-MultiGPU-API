@@ -103,46 +103,67 @@ def generate_notification_beep(volume=50, sample_rate=44100):
         wave = wave / max_amplitude * 0.85  # More conservative normalization
     
     return wave
-
+_mixer_lock = threading.Lock()
 
 def play_audio_with_pygame(audio_data, sample_rate=44100):
-    """Play audio using pygame backend"""
+    """
+    Play audio with clean stereo output - sounds like single notification from both speakers
+    """
     try:
         import pygame
-        # Initialize pygame mixer only if not already initialized
-        if not pygame.mixer.get_init():
-            pygame.mixer.pre_init(frequency=sample_rate, size=-16, channels=2, buffer=1024)
-            pygame.mixer.init()
-        else:
-            # Reinitialize with new settings if needed
-            current_freq, current_size, current_channels = pygame.mixer.get_init()
-            if current_freq != sample_rate or current_channels != 2:
+        
+        with _mixer_lock:
+            if len(audio_data) == 0:
+                return False
+            
+            # Clean mixer initialization - quit any existing mixer first
+            if pygame.mixer.get_init() is not None:
                 pygame.mixer.quit()
-                pygame.mixer.pre_init(frequency=sample_rate, size=-16, channels=2, buffer=1024)
-                pygame.mixer.init()
-        
-        audio_int16 = (audio_data * 32767).astype(np.int16)
-        
-        # Convert mono to stereo
-        if len(audio_int16.shape) == 1:
-            stereo_data = np.column_stack((audio_int16, audio_int16))
-        else:
-            stereo_data = audio_int16
-        
-        sound = pygame.sndarray.make_sound(stereo_data)
-        sound.play()
-        pygame.time.wait(int(len(audio_data) / sample_rate * 1000) + 100)
-        # Don't quit mixer - this can interfere with Gradio server
-        # pygame.mixer.quit()
-        return True
+                time.sleep(0.2)  # Longer pause to ensure clean shutdown
+            
+            # Initialize fresh mixer
+            pygame.mixer.pre_init(
+                frequency=sample_rate,
+                size=-16,
+                channels=2,
+                buffer=512  # Smaller buffer to reduce latency/doubling
+            )
+            pygame.mixer.init()
+            
+            # Verify clean initialization
+            mixer_info = pygame.mixer.get_init()
+            if mixer_info is None or mixer_info[2] != 2:
+                return False
+            
+            # Prepare audio - ensure clean conversion
+            audio_int16 = (audio_data * 32767).astype(np.int16)
+            if len(audio_int16.shape) > 1:
+                audio_int16 = audio_int16.flatten()
+            
+            # Create clean stereo with identical channels
+            stereo_data = np.zeros((len(audio_int16), 2), dtype=np.int16)
+            stereo_data[:, 0] = audio_int16  # Left channel
+            stereo_data[:, 1] = audio_int16  # Right channel
+            
+            # Create sound and play once
+            sound = pygame.sndarray.make_sound(stereo_data)
+            
+            # Ensure only one playback
+            pygame.mixer.stop()  # Stop any previous sounds
+            sound.play()
+            
+            # Wait for completion
+            duration_ms = int(len(audio_data) / sample_rate * 1000) + 50
+            pygame.time.wait(duration_ms)
+            
+            return True
         
     except ImportError:
         return False
     except Exception as e:
-        print(f"Pygame error: {e}")
+        print(f"Pygame clean error: {e}")
         return False
-
-
+        
 def play_audio_with_sounddevice(audio_data, sample_rate=44100):
     """Play audio using sounddevice backend"""
     try:

@@ -15,6 +15,7 @@ import soundfile as sf
 import torchvision
 import binascii
 import os.path as osp
+from skimage import color
 
 
 VID_EXTENSIONS = (".mp4", ".avi", ".mov", ".mkv")
@@ -351,3 +352,531 @@ def adaptive_projected_guidance(
     diff_parallel, diff_orthogonal = project(diff, pred_cond) 
     normalized_update = diff_orthogonal + eta * diff_parallel
     return normalized_update
+
+def match_and_blend_colors(source_chunk: torch.Tensor, reference_image: torch.Tensor, strength: float) -> torch.Tensor:
+    """
+    Matches the color of a source video chunk to a reference image and blends with the original.
+
+    Args:
+        source_chunk (torch.Tensor): The video chunk to be color-corrected (B, C, T, H, W) in range [-1, 1].
+                                     Assumes B=1 (batch size of 1).
+        reference_image (torch.Tensor): The reference image (B, C, 1, H, W) in range [-1, 1].
+                                        Assumes B=1 and T=1 (single reference frame).
+        strength (float): The strength of the color correction (0.0 to 1.0).
+                          0.0 means no correction, 1.0 means full correction.
+
+    Returns:
+        torch.Tensor: The color-corrected and blended video chunk.
+    """
+    # print(f"[match_and_blend_colors] Input source_chunk shape: {source_chunk.shape}, reference_image shape: {reference_image.shape}, strength: {strength}")
+
+    if strength == 0.0:
+        # print(f"[match_and_blend_colors] Strength is 0, returning original source_chunk.")
+        return source_chunk
+
+    if not 0.0 <= strength <= 1.0:
+        raise ValueError(f"Strength must be between 0.0 and 1.0, got {strength}")
+
+    device = source_chunk.device
+    dtype = source_chunk.dtype
+
+    # Squeeze batch dimension, permute to T, H, W, C for skimage
+    # Source: (1, C, T, H, W) -> (T, H, W, C)
+    source_np = source_chunk.squeeze(0).permute(1, 2, 3, 0).cpu().numpy()
+    # Reference: (1, C, 1, H, W) -> (H, W, C)
+    ref_np = reference_image.squeeze(0).squeeze(1).permute(1, 2, 0).cpu().numpy() # Squeeze T dimension as well
+
+    # Normalize from [-1, 1] to [0, 1] for skimage
+    source_np_01 = (source_np + 1.0) / 2.0
+    ref_np_01 = (ref_np + 1.0) / 2.0
+
+    # Clip to ensure values are strictly in [0, 1] after potential float precision issues
+    source_np_01 = np.clip(source_np_01, 0.0, 1.0)
+    ref_np_01 = np.clip(ref_np_01, 0.0, 1.0)
+
+    # Convert reference to Lab
+    try:
+        ref_lab = color.rgb2lab(ref_np_01)
+    except ValueError as e:
+        # Handle potential errors if image data is not valid for conversion
+        print(f"Warning: Could not convert reference image to Lab: {e}. Skipping color correction for this chunk.")
+        return source_chunk
+
+
+    corrected_frames_np_01 = []
+    for i in range(source_np_01.shape[0]): # Iterate over time (T)
+        source_frame_rgb_01 = source_np_01[i]
+        
+        try:
+            source_lab = color.rgb2lab(source_frame_rgb_01)
+        except ValueError as e:
+            print(f"Warning: Could not convert source frame {i} to Lab: {e}. Using original frame.")
+            corrected_frames_np_01.append(source_frame_rgb_01)
+            continue
+
+        corrected_lab_frame = source_lab.copy()
+
+        # Perform color transfer for L, a, b channels
+        for j in range(3): # L, a, b
+            mean_src, std_src = source_lab[:, :, j].mean(), source_lab[:, :, j].std()
+            mean_ref, std_ref = ref_lab[:, :, j].mean(), ref_lab[:, :, j].std()
+
+            # Avoid division by zero if std_src is 0
+            if std_src == 0:
+                # If source channel has no variation, keep it as is, but shift by reference mean
+                # This case is debatable, could also just copy source or target mean.
+                # Shifting by target mean helps if source is flat but target isn't.
+                corrected_lab_frame[:, :, j] = mean_ref 
+            else:
+                corrected_lab_frame[:, :, j] = (corrected_lab_frame[:, :, j] - mean_src) * (std_ref / std_src) + mean_ref
+        
+        try:
+            fully_corrected_frame_rgb_01 = color.lab2rgb(corrected_lab_frame)
+        except ValueError as e:
+            print(f"Warning: Could not convert corrected frame {i} back to RGB: {e}. Using original frame.")
+            corrected_frames_np_01.append(source_frame_rgb_01)
+            continue
+            
+        # Clip again after lab2rgb as it can go slightly out of [0,1]
+        fully_corrected_frame_rgb_01 = np.clip(fully_corrected_frame_rgb_01, 0.0, 1.0)
+
+        # Blend with original source frame (in [0,1] RGB)
+        blended_frame_rgb_01 = (1 - strength) * source_frame_rgb_01 + strength * fully_corrected_frame_rgb_01
+        corrected_frames_np_01.append(blended_frame_rgb_01)
+
+    corrected_chunk_np_01 = np.stack(corrected_frames_np_01, axis=0)
+
+    # Convert back to [-1, 1]
+    corrected_chunk_np_minus1_1 = (corrected_chunk_np_01 * 2.0) - 1.0
+
+    # Permute back to (C, T, H, W), add batch dim, and convert to original torch.Tensor type and device
+    # (T, H, W, C) -> (C, T, H, W)
+    corrected_chunk_tensor = torch.from_numpy(corrected_chunk_np_minus1_1).permute(3, 0, 1, 2).unsqueeze(0)
+    corrected_chunk_tensor = corrected_chunk_tensor.contiguous() # Ensure contiguous memory layout
+    output_tensor = corrected_chunk_tensor.to(device=device, dtype=dtype)
+    # print(f"[match_and_blend_colors] Output tensor shape: {output_tensor.shape}")
+    return output_tensor
+
+
+from skimage import color
+from scipy import ndimage
+from scipy.ndimage import binary_erosion, distance_transform_edt
+
+
+def match_and_blend_colors_with_mask(
+    source_chunk: torch.Tensor, 
+    reference_video: torch.Tensor, 
+    mask: torch.Tensor,
+    strength: float,
+    copy_mode: str = "corrected",  # "corrected", "reference", "source", "progressive_blend"
+    source_border_distance: int = 10,
+    reference_border_distance: int = 10
+) -> torch.Tensor:
+    """
+    Matches the color of a source video chunk to a reference video using mask-based region sampling.
+
+    Args:
+        source_chunk (torch.Tensor): The video chunk to be color-corrected (B, C, T, H, W) in range [-1, 1].
+                                     Assumes B=1 (batch size of 1).
+        reference_video (torch.Tensor): The reference video (B, C, T, H, W) in range [-1, 1].
+                                        Must have same temporal dimension as source_chunk.
+        mask (torch.Tensor): Binary mask (B, 1, T, H, W) or (T, H, W) or (H, W) with values 0 and 1.
+                            Color correction is applied to pixels where mask=1.
+        strength (float): The strength of the color correction (0.0 to 1.0).
+                          0.0 means no correction, 1.0 means full correction.
+        copy_mode (str): What to do with mask=0 pixels: 
+                        "corrected" (keep original), "reference", "source", 
+                        "progressive_blend" (double-sided progressive blending near borders).
+        source_border_distance (int): Distance in pixels from mask border to sample source video (mask=1 side).
+        reference_border_distance (int): Distance in pixels from mask border to sample reference video (mask=0 side).
+                                         For "progressive_blend" mode, this also defines the blending falloff distance.
+
+    Returns:
+        torch.Tensor: The color-corrected and blended video chunk.
+        
+    Notes:
+        - Color statistics are sampled from border regions to determine source and reference tints
+        - Progressive blending creates smooth double-sided transitions:
+          * mask=1 side: 60% source + 40% reference at border → 100% source deeper in
+          * mask=0 side: 60% reference + 40% source at border → 100% reference deeper in
+    """
+    
+    if strength == 0.0:
+        return source_chunk
+
+    if not 0.0 <= strength <= 1.0:
+        raise ValueError(f"Strength must be between 0.0 and 1.0, got {strength}")
+    
+    if copy_mode not in ["corrected", "reference", "source", "progressive_blend"]:
+        raise ValueError(f"copy_mode must be 'corrected', 'reference', 'source', or 'progressive_blend', got {copy_mode}")
+
+    device = source_chunk.device
+    dtype = source_chunk.dtype
+    B, C, T, H, W = source_chunk.shape
+
+    # Handle different mask dimensions
+    if mask.dim() == 2:  # (H, W)
+        mask = mask.unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(B, 1, T, H, W)
+    elif mask.dim() == 3:  # (T, H, W)
+        mask = mask.unsqueeze(0).unsqueeze(0).expand(B, 1, T, H, W)
+    elif mask.dim() == 4:  # (B, T, H, W) - missing channel dim
+        mask = mask.unsqueeze(1)
+    # mask should now be (B, 1, T, H, W)
+
+    # Convert to numpy for processing
+    source_np = source_chunk.squeeze(0).permute(1, 2, 3, 0).cpu().numpy()  # (T, H, W, C)
+    reference_np = reference_video.squeeze(0).permute(1, 2, 3, 0).cpu().numpy()  # (T, H, W, C)
+    mask_np = mask.squeeze(0).squeeze(0).cpu().numpy()  # (T, H, W)
+
+    # Normalize from [-1, 1] to [0, 1] for skimage
+    source_np_01 = (source_np + 1.0) / 2.0
+    reference_np_01 = (reference_np + 1.0) / 2.0
+    
+    # Clip to ensure values are in [0, 1]
+    source_np_01 = np.clip(source_np_01, 0.0, 1.0)
+    reference_np_01 = np.clip(reference_np_01, 0.0, 1.0)
+
+    corrected_frames_np_01 = []
+    
+    for t in range(T):
+        source_frame = source_np_01[t]  # (H, W, C)
+        reference_frame = reference_np_01[t]  # (H, W, C)
+        frame_mask = mask_np[t]  # (H, W)
+        
+        # Find mask borders and create distance maps
+        border_regions = get_border_sampling_regions(frame_mask, source_border_distance, reference_border_distance)
+        source_sample_region = border_regions['source_region']  # mask=1 side
+        reference_sample_region = border_regions['reference_region']  # mask=0 side
+        
+        # Sample pixels for color statistics
+        try:
+            source_stats = compute_color_stats(source_frame, source_sample_region)
+            reference_stats = compute_color_stats(reference_frame, reference_sample_region)
+        except ValueError as e:
+            print(f"Warning: Could not compute color statistics for frame {t}: {e}. Using original frame.")
+            corrected_frames_np_01.append(source_frame)
+            continue
+        
+        # Apply color correction to mask=1 area and handle mask=0 area based on copy_mode
+        corrected_frame = apply_color_correction_with_mask(
+            source_frame, frame_mask, source_stats, reference_stats, strength
+        )
+        
+        # Handle mask=0 pixels based on copy_mode
+        if copy_mode == "reference":
+            corrected_frame = apply_copy_with_mask(corrected_frame, reference_frame, frame_mask, "reference")
+        elif copy_mode == "source":
+            corrected_frame = apply_copy_with_mask(corrected_frame, source_frame, frame_mask, "source")
+        elif copy_mode == "progressive_blend":
+            # Apply progressive blending in mask=1 border area (source side)
+            corrected_frame = apply_progressive_blend_in_corrected_area(
+                corrected_frame, reference_frame, frame_mask, 
+                border_regions['source_region'], border_regions['source_distances'], 
+                border_regions['reference_region'], source_border_distance
+            )
+            # Copy reference pixels to mask=0 area first
+            corrected_frame = apply_copy_with_mask(corrected_frame, reference_frame, frame_mask, "reference")
+            # Then apply progressive blending in mask=0 border area (reference side)
+            corrected_frame = apply_progressive_blend_in_reference_area(
+                corrected_frame, source_frame, frame_mask, 
+                border_regions['reference_region'], border_regions['reference_distances'], 
+                reference_border_distance
+            )
+            
+        corrected_frames_np_01.append(corrected_frame)
+
+    corrected_chunk_np_01 = np.stack(corrected_frames_np_01, axis=0)
+
+    # Convert back to [-1, 1] and return to tensor format
+    corrected_chunk_np_minus1_1 = (corrected_chunk_np_01 * 2.0) - 1.0
+    corrected_chunk_tensor = torch.from_numpy(corrected_chunk_np_minus1_1).permute(3, 0, 1, 2).unsqueeze(0)
+    corrected_chunk_tensor = corrected_chunk_tensor.contiguous()
+    output_tensor = corrected_chunk_tensor.to(device=device, dtype=dtype)
+    
+    return output_tensor
+
+
+def get_border_sampling_regions(mask, source_border_distance, reference_border_distance):
+    """
+    Create regions for sampling near mask borders with separate distances for source and reference.
+    
+    Args:
+        mask: Binary mask (H, W) with 0s and 1s
+        source_border_distance: Distance from border to include in source sampling (mask=1 side)
+        reference_border_distance: Distance from border to include in reference sampling (mask=0 side)
+        
+    Returns:
+        Dict with sampling regions and distance maps for blending
+    """
+    # Convert to boolean for safety
+    mask_bool = mask.astype(bool)
+    
+    # Distance from mask=0 regions (distance into mask=1 areas from border)
+    dist_from_mask0 = distance_transform_edt(mask_bool)
+    
+    # Distance from mask=1 regions (distance into mask=0 areas from border)  
+    dist_from_mask1 = distance_transform_edt(~mask_bool)
+    
+    # Source region: mask=1 pixels within source_border_distance of mask=0 pixels
+    source_region = mask_bool & (dist_from_mask0 <= source_border_distance)
+    
+    # Reference region: mask=0 pixels within reference_border_distance of mask=1 pixels
+    reference_region = (~mask_bool) & (dist_from_mask1 <= reference_border_distance)
+    
+    return {
+        'source_region': source_region,
+        'reference_region': reference_region,
+        'source_distances': dist_from_mask0,  # Distance into mask=1 from border
+        'reference_distances': dist_from_mask1  # Distance into mask=0 from border
+    }
+
+
+def compute_color_stats(image, sample_region):
+    """
+    Compute color statistics (mean and std) for Lab channels in the sampling region.
+    
+    Args:
+        image: RGB image (H, W, C) in range [0, 1]
+        sample_region: Boolean mask (H, W) indicating pixels to sample
+        
+    Returns:
+        Dict with 'mean' and 'std' for Lab components
+    """
+    if not np.any(sample_region):
+        raise ValueError("No pixels in sampling region")
+    
+    # Convert to Lab
+    try:
+        image_lab = color.rgb2lab(image)
+    except ValueError as e:
+        raise ValueError(f"Could not convert image to Lab: {e}")
+    
+    # Extract pixels in sampling region
+    sampled_pixels = image_lab[sample_region]  # (N, 3) where N is number of sampled pixels
+    
+    # Compute statistics for each Lab channel
+    stats = {
+        'mean': np.mean(sampled_pixels, axis=0),  # (3,) for L, a, b
+        'std': np.std(sampled_pixels, axis=0)     # (3,) for L, a, b
+    }
+    
+    return stats
+
+
+def apply_color_correction_with_mask(source_frame, mask, source_stats, reference_stats, strength):
+    """
+    Apply color correction to pixels where mask=1.
+    
+    Args:
+        source_frame: RGB image (H, W, C) in range [0, 1]
+        mask: Binary mask (H, W)
+        source_stats: Color statistics from source sampling region
+        reference_stats: Color statistics from reference sampling region
+        strength: Blending strength
+        
+    Returns:
+        Corrected RGB image (H, W, C)
+    """
+    try:
+        source_lab = color.rgb2lab(source_frame)
+    except ValueError as e:
+        print(f"Warning: Could not convert source frame to Lab: {e}. Using original frame.")
+        return source_frame
+    
+    corrected_lab = source_lab.copy()
+    correction_region = (mask == 1)  # Apply correction to mask=1 pixels
+    
+    # Apply color transfer to pixels where mask=1
+    for c in range(3):  # L, a, b channels
+        mean_src = source_stats['mean'][c]
+        std_src = source_stats['std'][c]
+        mean_ref = reference_stats['mean'][c]
+        std_ref = reference_stats['std'][c]
+        
+        if std_src == 0:
+            # Handle case where source channel has no variation
+            corrected_lab[correction_region, c] = mean_ref
+        else:
+            # Standard color transfer formula
+            corrected_lab[correction_region, c] = (
+                (corrected_lab[correction_region, c] - mean_src) * (std_ref / std_src) + mean_ref
+            )
+    
+    try:
+        fully_corrected_rgb = color.lab2rgb(corrected_lab)
+    except ValueError as e:
+        print(f"Warning: Could not convert corrected frame back to RGB: {e}. Using original frame.")
+        return source_frame
+    
+    # Clip to [0, 1]
+    fully_corrected_rgb = np.clip(fully_corrected_rgb, 0.0, 1.0)
+    
+    # Blend with original (only in correction region)
+    result = source_frame.copy()
+    result[correction_region] = (
+        (1 - strength) * source_frame[correction_region] + 
+        strength * fully_corrected_rgb[correction_region]
+    )
+    
+    return result
+
+
+def apply_progressive_blend_in_corrected_area(corrected_frame, reference_frame, mask, source_region, source_distances, reference_region, source_border_distance):
+    """
+    Apply progressive blending in the corrected area (mask=1) near the border.
+    
+    Args:
+        corrected_frame: RGB image (H, W, C) - the color-corrected source frame
+        reference_frame: RGB image (H, W, C) - the reference frame
+        mask: Binary mask (H, W)
+        source_region: Boolean mask (H, W) indicating the source blending region (mask=1 near border)
+        source_distances: Distance map (H, W) into mask=1 area from mask=0 border
+        reference_region: Boolean mask (H, W) indicating the reference sampling region (mask=0 near border)
+        source_border_distance: Maximum distance for source blending
+        
+    Returns:
+        Blended RGB image (H, W, C)
+        
+            Notes:
+        - Each source pixel blends with its closest reference border pixel (for speed)
+        - At mask border: 60% source + 40% reference
+        - Deeper into mask=1 area: 100% corrected source
+    """
+    result = corrected_frame.copy()
+    
+    # Blend in the source region (mask=1 pixels near border)
+    blend_region = source_region
+    
+    if np.any(blend_region):
+        # Find immediate border pixels (mask=0 pixels adjacent to mask=1 pixels)
+        # This is much faster than using the entire reference region
+        from scipy.ndimage import binary_dilation
+        
+        # Dilate mask=1 by 1 pixel, then find intersection with mask=0
+        mask_1_dilated = binary_dilation(mask == 1, structure=np.ones((3, 3)))
+        border_pixels = (mask == 0) & mask_1_dilated
+        
+        if np.any(border_pixels):
+            # Find closest border pixel for each source pixel
+            source_coords = np.column_stack(np.where(blend_region))  # (N, 2) - y, x coordinates
+            border_coords = np.column_stack(np.where(border_pixels))  # (M, 2) - much smaller set!
+            
+            # For each source pixel, find closest border pixel
+            from scipy.spatial.distance import cdist
+            distances_matrix = cdist(source_coords, border_coords, metric='euclidean')
+            closest_border_indices = np.argmin(distances_matrix, axis=1)
+            
+            # Normalize source distances for blending weights
+            min_distance_in_region = np.min(source_distances[blend_region])
+            max_distance_in_region = np.max(source_distances[blend_region])
+            
+            if max_distance_in_region > min_distance_in_region:
+                # Calculate blend weights: 0.4 at border (60% source + 40% reference), 0.0 at max distance (100% source)
+                source_dist_values = source_distances[blend_region]
+                normalized_distances = (source_dist_values - min_distance_in_region) / (max_distance_in_region - min_distance_in_region)
+                blend_weights = 0.4 * (1.0 - normalized_distances)  # Start with 40% reference influence at border
+                
+                # Apply blending with closest border pixels
+                for i, (source_y, source_x) in enumerate(source_coords):
+                    closest_border_idx = closest_border_indices[i]
+                    border_y, border_x = border_coords[closest_border_idx]
+                    
+                    weight = blend_weights[i]
+                    # Blend with closest border pixel
+                    result[source_y, source_x] = (
+                        (1.0 - weight) * corrected_frame[source_y, source_x] + 
+                        weight * reference_frame[border_y, border_x]
+                    )
+    
+    return result
+
+
+def apply_progressive_blend_in_reference_area(reference_frame, source_frame, mask, reference_region, reference_distances, reference_border_distance):
+    """
+    Apply progressive blending in the reference area (mask=0) near the border.
+    
+    Args:
+        reference_frame: RGB image (H, W, C) - the reference frame with copied reference pixels
+        source_frame: RGB image (H, W, C) - the original source frame
+        mask: Binary mask (H, W)
+        reference_region: Boolean mask (H, W) indicating the reference blending region (mask=0 near border)
+        reference_distances: Distance map (H, W) into mask=0 area from mask=1 border
+        reference_border_distance: Maximum distance for reference blending
+        
+    Returns:
+        Blended RGB image (H, W, C)
+        
+    Notes:
+        - Each reference pixel blends with its closest source border pixel (for speed)
+        - At mask border: 60% reference + 40% source
+        - Deeper into mask=0 area: 100% reference
+    """
+    result = reference_frame.copy()
+    
+    # Blend in the reference region (mask=0 pixels near border)
+    blend_region = reference_region
+    
+    if np.any(blend_region):
+        # Find immediate border pixels (mask=1 pixels adjacent to mask=0 pixels)
+        from scipy.ndimage import binary_dilation
+        
+        # Dilate mask=0 by 1 pixel, then find intersection with mask=1
+        mask_0_dilated = binary_dilation(mask == 0, structure=np.ones((3, 3)))
+        source_border_pixels = (mask == 1) & mask_0_dilated
+        
+        if np.any(source_border_pixels):
+            # Find closest source border pixel for each reference pixel
+            reference_coords = np.column_stack(np.where(blend_region))  # (N, 2) - y, x coordinates
+            source_border_coords = np.column_stack(np.where(source_border_pixels))  # (M, 2)
+            
+            # For each reference pixel, find closest source border pixel
+            from scipy.spatial.distance import cdist
+            distances_matrix = cdist(reference_coords, source_border_coords, metric='euclidean')
+            closest_source_indices = np.argmin(distances_matrix, axis=1)
+            
+            # Normalize reference distances for blending weights
+            min_distance_in_region = np.min(reference_distances[blend_region])
+            max_distance_in_region = np.max(reference_distances[blend_region])
+            
+            if max_distance_in_region > min_distance_in_region:
+                # Calculate blend weights: 0.4 at border (60% reference + 40% source), 0.0 at max distance (100% reference)
+                reference_dist_values = reference_distances[blend_region]
+                normalized_distances = (reference_dist_values - min_distance_in_region) / (max_distance_in_region - min_distance_in_region)
+                blend_weights = 0.4 * (1.0 - normalized_distances)  # Start with 40% source influence at border
+                
+                # Apply blending with closest source border pixels
+                for i, (ref_y, ref_x) in enumerate(reference_coords):
+                    closest_source_idx = closest_source_indices[i]
+                    source_y, source_x = source_border_coords[closest_source_idx]
+                    
+                    weight = blend_weights[i]
+                    # Blend: weight=0.4 means 60% reference + 40% source at border
+                    result[ref_y, ref_x] = (
+                        (1.0 - weight) * reference_frame[ref_y, ref_x] + 
+                        weight * source_frame[source_y, source_x]
+                    )
+    
+    return result
+
+
+def apply_copy_with_mask(source_frame, reference_frame, mask, copy_source):
+    """
+    Copy pixels to mask=0 regions based on copy_source parameter.
+    
+    Args:
+        source_frame: RGB image (H, W, C)
+        reference_frame: RGB image (H, W, C)
+        mask: Binary mask (H, W)
+        copy_source: "reference" or "source"
+        
+    Returns:
+        Combined RGB image (H, W, C)
+    """
+    result = source_frame.copy()
+    mask_0_region = (mask == 0)
+    
+    if copy_source == "reference":
+        result[mask_0_region] = reference_frame[mask_0_region]
+    # If "source", we keep the original source pixels (no change needed)
+    
+    return result
