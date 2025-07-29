@@ -78,6 +78,8 @@ class WanAny2V:
         self.num_train_timesteps = config.num_train_timesteps
         self.param_dtype = config.param_dtype
         self.model_def = model_def
+        self.model2 = None
+        self.transformer_switch = model_def.get("URLs2", None) is not None
         self.text_encoder = T5EncoderModel(
             text_len=config.text_len,
             dtype=config.t5_dtype,
@@ -101,24 +103,31 @@ class WanAny2V:
             vae_pth=os.path.join(checkpoint_dir, config.vae_checkpoint), dtype= VAE_dtype,
             device=self.device)
         
-        xmodel_filename = "c:/temp/wan2.1_text2video_1.3B_bf16.safetensors"
         # config_filename= "configs/t2v_1.3B.json"
         # import json
         # with open(config_filename, 'r', encoding='utf-8') as f:
         #     config = json.load(f)
         # sd = safetensors2.torch_load_file(xmodel_filename)
-        # model_filename = "c:/temp/vace1_3B.safetensors"
+        # model_filename = "c:/temp/wan2.2t2v/high/diffusion_pytorch_model-00001-of-00006.safetensors"
         base_config_file = f"configs/{base_model_type}.json"
         forcedConfigPath = base_config_file if len(model_filename) > 1 else None
         # forcedConfigPath = base_config_file = f"configs/flf2v_720p.json"
         # model_filename[1] = xmodel_filename
+        model_filename2 = None
+        if self.transformer_switch:
+            model_filename2 = model_filename[1:] 
+            model_filename = model_filename[:1] + model_filename[2:]
         self.model = offload.fast_load_transformers_model(model_filename, modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, writable_tensors= False, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath)
+        if model_filename2 is not None:
+            self.model2 = offload.fast_load_transformers_model(model_filename2, modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, writable_tensors= False, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath)
+
         # self.model = offload.load_model_data(self.model, xmodel_filename )
         # offload.load_model_data(self.model, "c:/temp/Phantom-Wan-1.3B.pth")
         self.model.lock_layers_dtypes(torch.float32 if mixed_precision_transformer else dtype)
         offload.change_dtype(self.model, dtype, True)
         # offload.save_model(self.model, "wan2.1_text2video_1.3B_mbf16.safetensors", do_quantize= False, config_file_path=base_config_file, filter_sd=sd)
-        # offload.save_model(self.model, "wan2.1_text2video_14B_quanto_mfp16_int8.safetensors", do_quantize=True, config_file_path=base_config_file)
+        # offload.save_model(self.model, "wan2.2_text2video_14B_high_mbf16.safetensors",  config_file_path=base_config_file)
+        # offload.save_model(self.model, "wan2.2_text2video_14B_high_quanto_mfp16_int8.safetensors", do_quantize=True, config_file_path=base_config_file)
         self.model.eval().requires_grad_(False)
         if save_quantized:
             from wgp import save_quantized_model
@@ -136,7 +145,8 @@ class WanAny2V:
                                             seq_len=32760,
                                             keep_last=True)
 
-            self.adapt_vace_model()
+            self.adapt_vace_model(self.model)
+            if self.model2 is not None: self.adapt_vace_model(self.model2)
 
         self.num_timesteps = 1000 
         self.use_timestep_transform = True 
@@ -353,6 +363,8 @@ class WanAny2V:
         sample_solver='unipc',
         sampling_steps=50,
         guide_scale=5.0,
+        guide2_scale = 5.0,
+        switch_threshold = 0,
         n_prompt="",
         seed=-1,
         callback = None,
@@ -384,6 +396,7 @@ class WanAny2V:
         color_correction_strength = 1,
         prefix_frames_count = 0,
         image_mode = 0,
+
         **bbargs
                 ):
         
@@ -699,9 +712,18 @@ class WanAny2V:
             apg_norm_threshold = 55
             text_momentumbuffer  = MomentumBuffer(apg_momentum) 
             audio_momentumbuffer = MomentumBuffer(apg_momentum) 
+
+        guidance_switch_done = False
+
         # denoising
+        trans = self.model
         for i, t in enumerate(tqdm(timesteps)):
-            offload.set_step_no_for_lora(self.model, i)
+            if not guidance_switch_done and t <= switch_threshold:
+                guide_scale = guide2_scale
+                if self.model2 is not None: trans = self.model2
+                guidance_switch_done = True
+ 
+            offload.set_step_no_for_lora(trans, i)
             timestep = torch.stack([t])
             kwargs.update({"t": timestep, "current_step": i})  
             kwargs["slg_layers"] = slg_layers if int(slg_start * sampling_steps) <= i < int(slg_end * sampling_steps) else None
@@ -760,7 +782,7 @@ class WanAny2V:
                 }
 
             if joint_pass and guide_scale > 1:
-                ret_values = self.model( **gen_args , **kwargs)
+                ret_values = trans( **gen_args , **kwargs)
                 if self._interrupt:
                     return None               
             else:
@@ -768,7 +790,7 @@ class WanAny2V:
                 ret_values = [None] * size
                 for x_id in range(size):
                     sub_gen_args = {k : [v[x_id]] for k, v in gen_args.items() }
-                    ret_values[x_id] = self.model( **sub_gen_args, x_id= x_id , **kwargs)[0]
+                    ret_values[x_id] = trans( **sub_gen_args, x_id= x_id , **kwargs)[0]
                     if self._interrupt:
                         return None               
                 sub_gen_args = None
@@ -870,8 +892,7 @@ class WanAny2V:
             return { "x" : videos, "latent_slice" : latent_slice }
         return videos
 
-    def adapt_vace_model(self):
-        model = self.model
+    def adapt_vace_model(self, model):
         modules_dict= { k: m for k, m in model.named_modules()}
         for model_layer, vace_layer in model.vace_layers_mapping.items():
             module = modules_dict[f"vace_blocks.{vace_layer}"]
@@ -880,4 +901,7 @@ class WanAny2V:
         delattr(model, "vace_blocks")
 
 def query_model_def(model_type, model_def):
-    return None
+    if "URLs2" in model_def:
+        return { "no_steps_skipping":True}
+    else:
+        return None

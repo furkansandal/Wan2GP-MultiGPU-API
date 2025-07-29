@@ -17,6 +17,20 @@ from flux.util import (
     save_image,
 )
 
+from PIL import Image
+
+def stitch_images(img1, img2):
+    # Resize img2 to match img1's height
+    width1, height1 = img1.size
+    width2, height2 = img2.size
+    new_width2 = int(width2 * height1 / height2)
+    img2_resized = img2.resize((new_width2, height1), Image.Resampling.LANCZOS)
+    
+    stitched = Image.new('RGB', (width1 + new_width2, height1))
+    stitched.paste(img1, (0, 0))
+    stitched.paste(img2_resized, (width1, 0))
+    return stitched
+
 class model_factory:
     def __init__(
         self,
@@ -72,6 +86,7 @@ class model_factory:
             callback = None,
             loras_slists = None,
             batch_size = 1,
+            video_prompt_type = "",
             **bbargs
     ):
             
@@ -79,19 +94,30 @@ class model_factory:
                 return None
 
             device="cuda"
-            if input_ref_images != None and len(input_ref_images) > 0: 
-                image_ref = input_ref_images[0]
-                w, h = image_ref.size
-                height, width = calculate_new_dimensions(height, width, h, w, fit_into_canvas)
+            if "I" in video_prompt_type and input_ref_images != None and len(input_ref_images) > 0: 
+                if "K" in video_prompt_type and False :
+                    # image latents tiling method
+                    w, h = input_ref_images[0].size
+                    height, width = calculate_new_dimensions(height, width, h, w, fit_into_canvas)
+                else:
+                    # image stiching method
+                    stiched = input_ref_images[0]
+                    if "K" in video_prompt_type :
+                        w, h = input_ref_images[0].size
+                        height, width = calculate_new_dimensions(height, width, h, w, fit_into_canvas)
+
+                    for new_img in input_ref_images[1:]:
+                        stiched = stitch_images(stiched, new_img)
+                    input_ref_images  = [stiched]
             else:
-                image_ref = None
+                input_ref_images = None
 
             inp, height, width = prepare_kontext(
                 t5=self.t5,
                 clip=self.clip,
                 prompt=input_prompt,
                 ae=self.vae,
-                img_cond=image_ref,
+                img_cond_list=input_ref_images,
                 target_width=width,
                 target_height=height,
                 bs=batch_size,
@@ -99,7 +125,6 @@ class model_factory:
                 device=device,
             )
 
-            inp.pop("img_cond_orig")
             timesteps = get_schedule(sampling_steps, inp["img"].shape[1], shift=(self.name != "flux-schnell"))
             def unpack_latent(x):
                 return unpack(x.float(), height, width) 

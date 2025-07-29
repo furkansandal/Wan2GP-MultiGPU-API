@@ -211,7 +211,7 @@ class DTT2V:
         guide_scale: float = 5.0,
         seed: float = 0.0,
         overlap_noise: int = 0,
-        ar_step: int = 5,
+        model_mode: int = 5,
         causal_block_size: int = 5,
         causal_attention: bool = True,
         fps: int = 24,
@@ -231,7 +231,7 @@ class DTT2V:
         if frame_num > 1:
             frame_num = max(17, frame_num) # must match causal_block_size for value of 5
             frame_num = int( round( (frame_num - 17) / 20)* 20 + 17 )
-
+        ar_step = model_mode
         if ar_step == 0: 
             causal_block_size = 1
             causal_attention = False

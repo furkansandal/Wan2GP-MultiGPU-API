@@ -52,7 +52,7 @@ PROMPT_VARS_MAX = 10
 
 target_mmgp_version = "3.5.1"
 WanGP_version = "7.3"
-settings_version = 2.22
+settings_version = 2.23
 max_source_video_frames = 3000
 prompt_enhancer_image_caption_model, prompt_enhancer_image_caption_processor, prompt_enhancer_llm_model, prompt_enhancer_llm_tokenizer = None, None, None, None
 
@@ -178,6 +178,7 @@ def process_prompt_and_add_tasks(state, model_choice):
         return get_queue_table(queue)
     model_def = get_model_def(model_type)
     image_outputs = model_def.get("image_outputs", False)
+    no_steps_skipping = model_def.get("no_steps_skipping", False)
     model_type = get_base_model_type(model_type)
     inputs["model_filename"] = model_filename
     
@@ -278,8 +279,12 @@ def process_prompt_and_add_tasks(state, model_choice):
     skip_steps_cache_type= inputs["skip_steps_cache_type"]
     MMAudio_setting = inputs["MMAudio_setting"]
     image_mode = inputs["image_mode"]
+    switch_threshold = inputs["switch_threshold"]
 
-
+    if no_steps_skipping: skip_steps_cache_type = ""
+    if switch_threshold is not None and switch_threshold != 0 and len(skip_steps_cache_type) > 0:
+        gr.Info("Steps skipping is not yet supported if Switch Threshold is not null")
+        return
     if not model_def.get("lock_inference_steps", False) and model_type in ["ltxv_13B"] and num_inference_steps < 20:
         gr.Info("The minimum number of steps should be 20") 
         return
@@ -495,7 +500,8 @@ def process_prompt_and_add_tasks(state, model_choice):
         "denoising_strength": denoising_strength,
         "image_prompt_type": image_prompt_type,
         "video_prompt_type": video_prompt_type,        
-        "audio_prompt_type": audio_prompt_type,        
+        "audio_prompt_type": audio_prompt_type,
+        "skip_steps_cache_type": skip_steps_cache_type
     } 
 
     if inputs["multi_prompts_gen_type"] == 0:
@@ -1698,7 +1704,7 @@ for path in  ["wan2.1_Vace_1.3B_preview_bf16.safetensors", "sky_reels2_diffusion
         print(f"Removing old version of model '{path}'. A new version of this model will be downloaded next time you use it.")
         os.remove( os.path.join("ckpts" , path))
 
-families_infos = {"wan":(0, "Wan2.1"), "ltxv":(1, "LTX Video"), "hunyuan":(2, "Hunyuan Video"), "flux":(3, "Flux 1"), "unknown": (100, "Unknown") }
+families_infos = {"wan":(0, "Wan2.1"), "wan2_2":(1, "Wan2.2"), "ltxv":(10, "LTX Video"), "hunyuan":(20, "Hunyuan Video"), "flux":(30, "Flux 1"), "unknown": (100, "Unknown") }
 
 models_def = {}
 
@@ -1771,15 +1777,22 @@ def get_model_type(model_filename):
     return None
     # raise Exception("Unknown model:" + model_filename)
 
-def get_model_family(model_type):
-    model_type = get_base_model_type(model_type)
-    if model_type == None:
+def get_model_family(model_type, for_ui = False):
+    base_model_type = get_base_model_type(model_type)
+    if base_model_type is None:
         return "unknown"
-    if "hunyuan" in model_type :
+    
+    if for_ui : 
+        model_def = get_model_def(model_type)
+        model_family = model_def.get("group", None)
+        if model_family is not None and model_family in families_infos:
+            return model_family
+        
+    if "hunyuan" in base_model_type :
         return "hunyuan"
-    elif "ltxv" in model_type:
+    elif "ltxv" in base_model_type:
         return "ltxv"
-    elif "flux" in model_type:
+    elif "flux" in base_model_type:
         return "flux"
     else:
         return "wan"
@@ -1862,17 +1875,19 @@ def get_model_recursive_prop(model_type, prop = "URLs", return_list = True,  sta
             raise Exception(f"Unknown model type '{model_type}'")
         
 
-def get_model_filename(model_type, quantization ="int8", dtype_policy = "", is_module = False, stack=[]):
+def get_model_filename(model_type, quantization ="int8", dtype_policy = "", is_module = False, submodel_no = 1, stack=[]):
     if is_module:
         choices = modules_files.get(model_type, None)
         if choices == None: raise Exception(f"Invalid Module Id '{model_type}'")
     else:
+        key_name = "URLs" if submodel_no  <= 1 else f"URLs{submodel_no}"
+
         model_def = models_def.get(model_type, None)
         if model_def == None: return ""
-        URLs = model_def["URLs"]
+        URLs = model_def[key_name]
         if isinstance(URLs, str):
-            if len(stack) > 10: raise Exception(f"Circular Reference in Model URLs dependencies: {stack}")
-            return get_model_filename(URLs, quantization=quantization, dtype_policy=dtype_policy, stack = stack + [URLs])
+            if len(stack) > 10: raise Exception(f"Circular Reference in Model {key_name} dependencies: {stack}")
+            return get_model_filename(URLs, quantization=quantization, dtype_policy=dtype_policy, submodel_no = submodel_no, stack = stack + [URLs])
         else:
             choices = [ ("ckpts/" + os.path.basename(path) if path.startswith("http") else path)  for path in URLs ]
     if len(quantization) == 0:
@@ -1960,6 +1975,8 @@ def fix_settings(model_type, ui_defaults):
     if model_type in ["hunyuan"]:
         video_prompt_type = video_prompt_type.replace("I", "")
 
+    if model_type in ["flux"] and video_settings_version < 2.23:
+        video_prompt_type = video_prompt_type.replace("K", "").replace("I", "KI")
 
     remove_background_images_ref = ui_defaults.get("remove_background_images_ref", 1)
     if video_settings_version < 2.22:
@@ -2044,7 +2061,7 @@ def get_default_settings(model_type):
             })            
             if model_def.get("reference_image", False):
                 ui_defaults.update({
-                    "video_prompt_type": "I",
+                    "video_prompt_type": "KI",
                 })
         elif base_model_type in ["sky_df_1.3B", "sky_df_14B"]:
             ui_defaults.update({
@@ -2131,9 +2148,9 @@ def get_model_query_handler(model_type):
     model_family= get_model_family(base_model_type)
     if model_family == "wan":
         if base_model_type in ("sky_df_1.3B", "sky_df_14B"):
-            from wan.any2video import query_model_def
-        else:
             from wan.diffusion_forcing import query_model_def
+        else:
+            from wan.any2video import query_model_def
     elif model_family == "hunyuan":
         from hyvideo.hunyuan import query_model_def
     elif model_family == "ltxv":
@@ -2350,7 +2367,7 @@ def download_mmaudio():
         }
         process_files_def(**enhancer_def)
 
-def download_models(model_filename, model_type):
+def download_models(model_filename, model_type, submodel_no = 1):
     def computeList(filename):
         if filename == None:
             return []
@@ -2407,23 +2424,27 @@ def download_models(model_filename, model_type):
 
     model_family = get_model_family(model_type)
     model_def = get_model_def(model_type)
-    if model_def != None and not model_type in modules_files:
+    
+    key_name = "URLs" if submodel_no  <= 1 else f"URLs{submodel_no}"
+    if not model_type in modules_files:
         if not os.path.isfile(model_filename ):
-            URLs = get_model_recursive_prop(model_type, "URLs", return_list= False)
-            if not isinstance(URLs, str): # dont download anything right now if a base type is referenced as the download will occur just after
-                use_url = model_filename 
-                for url in URLs:
-                    if os.path.basename(model_filename) in url:
-                        use_url = url
-                        break
-                if not url.startswith("http"):
-                    raise Exception(f"Model '{model_filename}' was not found locally and no URL was provided to download it. Please add an URL in the model definition file.")
-                try:
-                    download_file(use_url, model_filename)
-                except Exception as e:
-                    if os.path.isfile(model_filename): os.remove(model_filename) 
-                    raise Exception(f"URL '{use_url}' is invalid for Model '{model_filename}' : {str(e)}'")
-                model_filename = None
+            URLs = get_model_recursive_prop(model_type, key_name, return_list= False)
+            if isinstance(URLs, str):
+                raise Exception("Missing model " + URLs)
+            use_url = model_filename 
+            for url in URLs:
+                if os.path.basename(model_filename) in url:
+                    use_url = url
+                    break
+            if not url.startswith("http"):
+                raise Exception(f"Model '{model_filename}' in field '{key_name}' was not found locally and no URL was provided to download it. Please add an URL in the model definition file.")
+            try:
+                download_file(use_url, model_filename)
+            except Exception as e:
+                if os.path.isfile(model_filename): os.remove(model_filename) 
+                raise Exception(f"{key_name} '{use_url}' is invalid for Model '{model_filename}' : {str(e)}'")
+
+        model_filename = None
 
         preload_URLs = get_model_recursive_prop(model_type, "preload_URLs", return_list= True)
         for url in preload_URLs:
@@ -2619,6 +2640,9 @@ def load_wan_model(model_filename, model_type, base_model_type, model_def, quant
     )
 
     pipe = {"transformer": wan_model.model, "text_encoder" : wan_model.text_encoder.model, "vae": wan_model.vae.model }
+    if wan_model.model2 is not None:
+        pipe["transformer2"] = wan_model.model2
+
     if hasattr(wan_model, "clip"):
         pipe["text_encoder_2"] = wan_model.clip.model
     return wan_model, pipe
@@ -2699,9 +2723,16 @@ def load_hunyuan_model(model_filename, model_type = None,  base_model_type = Non
 
     return hunyuan_model, pipe
 
-def get_transformer_model(model):
+def get_transformer_model(model, submodel_no = 1):
+    if submodel_no > 1:
+        model_key = f"model{submodel_no}"
+        if not hasattr(model, model_key): return None
+
     if hasattr(model, "model"):
-        return model.model
+        if submodel_no > 1:
+            return getattr(model, f"model{submodel_no}")
+        else:
+            return model.model
     elif hasattr(model, "transformer"):
         return model.transformer
     else:
@@ -2715,6 +2746,10 @@ def load_models(model_type):
     preload =int(args.preload)
     save_quantized = args.save_quantized and model_def != None
     model_filename = get_model_filename(model_type=model_type, quantization= "" if save_quantized else transformer_quantization, dtype_policy = transformer_dtype_policy) 
+    if "URLs2" in model_def:
+        model_filename2 = get_model_filename(model_type=model_type, quantization= "" if save_quantized else transformer_quantization, dtype_policy = transformer_dtype_policy, submodel_no=2) # !!!!
+    else:
+        model_filename2 = None
     modules = get_model_recursive_prop(model_type, "modules", return_list= True)
     if save_quantized and "quanto" in model_filename:
         save_quantized = False
@@ -2736,7 +2771,9 @@ def load_models(model_type):
         preload = server_config.get("preload_in_VRAM", 0)
     model_file_list = [model_filename]
     model_type_list = [model_type]
-    new_transformer_filename = model_file_list[-1] 
+    if model_filename2 != None:
+        model_file_list += [model_filename2]
+        model_type_list += [model_type]
     for module_type in modules:
         model_file_list.append(get_model_filename(module_type, transformer_quantization, transformer_dtype, is_module= True))
         model_type_list.append(module_type)
@@ -2760,14 +2797,22 @@ def load_models(model_type):
     elif model_family == "hunyuan":
         wan_model, pipe = load_hunyuan_model(model_file_list, model_type, base_model_type, model_def, quantizeTransformer = quantizeTransformer, dtype = transformer_dtype, VAE_dtype = VAE_dtype, mixed_precision_transformer = mixed_precision_transformer, save_quantized = save_quantized)
     else:
-        raise Exception(f"Model '{new_transformer_filename}' not supported.")
-    wan_model._model_file_name = new_transformer_filename
+        raise Exception(f"Model '{model_filename}' not supported.")
     kwargs = { "extraModelsToQuantize": None }    
+    loras_transformer = ["transformer"]
     if profile in (2, 4, 5):
-        kwargs["budgets"] = { "transformer" : 100 if preload  == 0 else preload, "text_encoder" : 100 if preload  == 0 else preload, "*" : max(1000 if profile==5 else 3000 , preload) }
+        budgets = { "transformer" : 100 if preload  == 0 else preload, "text_encoder" : 100 if preload  == 0 else preload, "*" : max(1000 if profile==5 else 3000 , preload) }
+        if "transformer2" in pipe:
+            budgets["transformer2"] = 100 if preload  == 0 else preload
+            loras_transformer += ["transformer2"]
+        kwargs["budgets"] = budgets
     elif profile == 3:
         kwargs["budgets"] = { "*" : "70%" }
- 
+
+    if "transformer2" in pipe and profile in [2,4]:
+        kwargs["pinnedMemory"] = ["transformer", "transformer2"]
+
+
     global prompt_enhancer_image_caption_model, prompt_enhancer_image_caption_processor, prompt_enhancer_llm_model, prompt_enhancer_llm_tokenizer
     if server_config.get("enhancer_enabled", 0) == 1:
         from transformers import ( AutoModelForCausalLM, AutoProcessor, AutoTokenizer, LlamaForCausalLM )
@@ -2787,21 +2832,21 @@ def load_models(model_type):
         prompt_enhancer_llm_tokenizer = None
 
         
-    offloadobj = offload.profile(pipe, profile_no= profile, compile = compile, quantizeTransformer = False, loras = "transformer", coTenantsMap= {}, perc_reserved_mem_max = perc_reserved_mem_max , convertWeightsFloatTo = transformer_dtype, **kwargs)  
+    offloadobj = offload.profile(pipe, profile_no= profile, compile = compile, quantizeTransformer = False, loras = loras_transformer, coTenantsMap= {}, perc_reserved_mem_max = perc_reserved_mem_max , convertWeightsFloatTo = transformer_dtype, **kwargs)  
     if len(args.gpu) > 0:
         torch.set_default_device(args.gpu)
     transformer_type = model_type
-    return wan_model, offloadobj, pipe["transformer"] 
+    return wan_model, offloadobj 
 
 if not "P" in preload_model_policy:
     wan_model, offloadobj, transformer = None, None, None
     reload_needed = True
 else:
-    wan_model, offloadobj, transformer = load_models(transformer_type)
+    wan_model, offloadobj = load_models(transformer_type)
     if check_loras:
+        transformer = get_transformer_model(wan_model)
         setup_loras(transformer_type, transformer,  get_lora_dir(transformer_type), "", None)
         exit()
-    del transformer
 
 gen_in_progress = False
 
@@ -2939,6 +2984,7 @@ def apply_changes(  state,
     model_filename = get_model_filename(transformer_type, transformer_quantization, transformer_dtype_policy)
     state["model_filename"] = model_filename
     if all(change in ["attention_mode", "vae_config", "boost", "save_path", "metadata_type", "clear_file_list", "fit_canvas", "depth_anything_v2_variant", "notification_sound_enabled", "notification_sound_volume", "mmaudio_enabled", "max_frames_multiplier", "display_stats"] for change in changes ):
+        model_family = gr.Dropdown()
         model_choice = gr.Dropdown()
     else:
         reload_needed = True
@@ -3313,7 +3359,7 @@ def select_video(state, input_file_list, event_data: gr.EventData):
                 values += ["unipc" if len(video_sample_solver) ==0 else video_sample_solver]
                 labels += ["Sampler Solver"]                                        
             values += [video_resolution, video_length_summary, video_seed, video_guidance_scale, video_flow_shift, video_num_inference_steps]
-            labels += [ "Resolution", video_length_label, "Seed", video_guidance_label, "Flow Shift", "Num Inference steps"]
+            labels += [ "Resolution", video_length_label, "Seed", video_guidance_label, "Shift Scale", "Num Inference steps"]
             video_negative_prompt = configs.get("negative_prompt", "")
             if len(video_negative_prompt) > 0:
                 values += [video_negative_prompt]
@@ -3983,6 +4029,8 @@ def generate_video(
     force_fps,
     num_inference_steps,
     guidance_scale,
+    guidance2_scale,
+    switch_threshold,
     audio_guidance_scale,
     flow_shift,
     sample_solver,
@@ -4104,7 +4152,7 @@ def generate_video(
             offloadobj = None
         gc.collect()
         send_cmd("status", f"Loading model {get_model_name(model_type)}...")
-        wan_model, offloadobj, trans = load_models(model_type)
+        wan_model, offloadobj = load_models(model_type)
         send_cmd("status", "Model loaded")
         reload_needed=  False
 
@@ -4130,6 +4178,7 @@ def generate_video(
     VAE_tile_size = wan_model.vae.get_VAE_tile_size(vae_config, device_mem_capacity, server_config.get("vae_precision", "16") == "32")
 
     trans = get_transformer_model(wan_model)
+    trans2 = get_transformer_model(wan_model, 2)
     audio_sampling_rate = 16000
     base_model_type = get_base_model_type(model_type)
 
@@ -4189,11 +4238,15 @@ def generate_video(
             loras_selected = transformer_loras_filenames + loras_selected
             loras_list_mult_choices_nums = transformer_loras_multipliers + loras_list_mult_choices_nums
             loras_slists = transformer_loras_multipliers + loras_slists
-        offload.load_loras_into_model(trans, loras_selected, loras_list_mult_choices_nums, activate_all_loras=True, preprocess_sd=get_loras_preprocessor(trans, base_model_type), pinnedLora=pinnedLora, split_linear_modules_map = split_linear_modules_map) 
-        errors = trans._loras_errors
-        if len(errors) > 0:
-            error_files = [msg for _ ,  msg  in errors]
-            raise gr.Error("Error while loading Loras: " + ", ".join(error_files))
+        trans_list = [trans]
+        if trans2 is not None: trans_list += [trans2] 
+        for trans_item in trans_list:
+            offload.load_loras_into_model(trans_item, loras_selected, loras_list_mult_choices_nums, activate_all_loras=True, preprocess_sd=get_loras_preprocessor(trans, base_model_type), pinnedLora=pinnedLora, split_linear_modules_map = split_linear_modules_map) 
+            errors = trans._loras_errors
+            if len(errors) > 0:
+                error_files = [msg for _ ,  msg  in errors]
+                raise gr.Error("Error while loading Loras: " + ", ".join(error_files))
+        trans_item = trans_list = None
     seed = None if seed == -1 else seed
     # negative_prompt = "" # not applicable in the inference
     original_filename = model_filename 
@@ -4253,7 +4306,7 @@ def generate_video(
     any_background_ref = False
     outpainting_dims = None if video_guide_outpainting== None or len(video_guide_outpainting) == 0 or video_guide_outpainting == "0 0 0 0" or video_guide_outpainting.startswith("#") else [int(v) for v in video_guide_outpainting.split(" ")] 
 
-    if image_refs != None and len(image_refs) > 0 and (hunyuan_custom or phantom or hunyuan_avatar or vace):
+    if image_refs != None and len(image_refs) > 0 and (hunyuan_custom or phantom or hunyuan_avatar or vace or flux):
         frames_positions_list = [ int(pos)-1 for pos in frames_positions.split(" ")] if frames_positions !=None and len(frames_positions)> 0 else []
         frames_positions_list = frames_positions_list[:len(image_refs)]
         nb_frames_positions = len(frames_positions_list) 
@@ -4275,11 +4328,13 @@ def generate_video(
                 send_cmd("progress", [0, get_latest_status(state, "Removing Images References Background")])
             os.environ["U2NET_HOME"] = os.path.join(os.getcwd(), "ckpts", "rembg")
             from wan.utils.utils import resize_and_remove_background
-            image_refs[nb_frames_positions:]  = resize_and_remove_background(image_refs[nb_frames_positions:] , width, height, remove_background_images_ref > 0, any_background_ref, fit_into_canvas= not (vace or hunyuan_avatar) ) # no fit for vace ref images as it is done later
+            image_refs[nb_frames_positions:]  = resize_and_remove_background(image_refs[nb_frames_positions:] , width, height, remove_background_images_ref > 0, any_background_ref, fit_into_canvas= not (vace or hunyuan_avatar or flux) ) # no fit for vace ref images as it is done later
             update_task_thumbnails(task, locals())
             send_cmd("output")
     joint_pass = boost ==1 #and profile != 1 and profile != 3  
     trans.enable_cache = None if len(skip_steps_cache_type) == 0 else skip_steps_cache_type
+    if trans2 is not None:
+        trans2.enable_cache = None
 
     if trans.enable_cache != None:
         trans.cache_multiplier = skip_steps_multiplier
@@ -4670,6 +4725,8 @@ def generate_video(
                     sample_solver=sample_solver,
                     sampling_steps=num_inference_steps,
                     guide_scale=guidance_scale,
+                    guide2_scale = guidance2_scale,
+                    switch_threshold = switch_threshold, 
                     embedded_guidance_scale=embedded_guidance_scale,
                     n_prompt=negative_prompt,
                     seed=seed,
@@ -4690,7 +4747,7 @@ def generate_video(
                     audio_scale= audio_scale,
                     audio_context_lens= audio_context_lens,
                     context_scale = context_scale,
-                    ar_step = model_mode, #5
+                    model_mode = model_mode,
                     causal_block_size = 5,
                     causal_attention = True,
                     fps = fps,
@@ -4708,6 +4765,7 @@ def generate_video(
                     NAG_alpha = NAG_alpha,
                     speakers_bboxes =speakers_bboxes,
                     image_mode =  image_mode,
+                    video_prompt_type= video_prompt_type,
                     offloadobj = offloadobj,
                 )
             except Exception as e:
@@ -4925,6 +4983,9 @@ def generate_video(
         seed = set_seed(-1)
     clear_status(state)
     offload.unload_loras_from_model(trans)
+    if not trans2 is None:
+        offload.unload_loras_from_model(trans2)
+
     if len(control_audio_tracks) > 0:
         cleanup_temp_audio_files(control_audio_tracks)
 
@@ -5803,6 +5864,7 @@ def prepare_inputs_dict(target, inputs, model_type = None, model_filename = None
     ltxv = base_model_type in ["ltxv_13B"]
     recammaster = base_model_type in ["recam_1.3B"]
     phantom = base_model_type in ["phantom_1.3B", "phantom_14B"]
+    flux = base_model_type in ["flux"]
     hunyuan_video_custom =  base_model_type in ["hunyuan_custom", "hunyuan_custom_audio", "hunyuan_custom_edit"]
     model_family = get_model_family(base_model_type)
     if target == "settings":
@@ -5828,7 +5890,7 @@ def prepare_inputs_dict(target, inputs, model_type = None, model_filename = None
     if not server_config.get("enhancer_enabled", 0) == 1:
         pop += ["prompt_enhancer"]
 
-    if not recammaster and not diffusion_forcing:
+    if not recammaster and not diffusion_forcing and not flux:
         pop += ["model_mode"]
 
     if not vace and not phantom and not hunyuan_video_custom:
@@ -5847,14 +5909,14 @@ def prepare_inputs_dict(target, inputs, model_type = None, model_filename = None
     if not base_model_type in ["fantasy", "multitalk", "vace_multitalk_14B"]:
         pop += ["audio_guidance_scale", "speakers_locations"]
 
-    if not model_family in ["hunyuan", "flux"]:
+    if not model_family in ["hunyuan", "flux"] or model_def.get("no_guidance", False):
         pop += ["embedded_guidance_scale"]
 
     if not model_family in ["hunyuan", "wan"]:
         pop += ["skip_steps_cache_type", "skip_steps_multiplier", "skip_steps_start_step_perc"]
 
-    if model_def.get("no_guidance", False) or ltxv:
-        pop += ["guidance_scale",  "audio_guidance_scale", "embedded_guidance_scale"]
+    if model_def.get("no_guidance", False) or ltxv or model_family in ["hunyuan", "flux"] :
+        pop += ["guidance_scale", "guidance2_scale", "switch_threshold",  "audio_guidance_scale"]
 
     if model_def.get("image_outputs", False) or ltxv:
         pop += ["flow_shift"]
@@ -6181,6 +6243,8 @@ def save_inputs(
             force_fps,
             num_inference_steps,
             guidance_scale,
+            guidance2_scale,
+            switch_threshold,            
             audio_guidance_scale,
             flow_shift,
             sample_solver,
@@ -6344,7 +6408,7 @@ def change_model(state, model_choice):
     model_filename = get_model_filename(model_choice, transformer_quantization, transformer_dtype_policy)
     state["model_filename"] = model_filename
     last_model_per_family = state["last_model_per_family"] 
-    last_model_per_family[get_model_family(model_choice)] = model_choice
+    last_model_per_family[get_model_family(model_choice, for_ui= True)] = model_choice
     server_config["last_model_per_family"] = last_model_per_family
     server_config["last_model_type"] = model_choice
 
@@ -6376,7 +6440,7 @@ def preload_model_when_switching(state):
             gc.collect()
             model_filename = get_model_name(model_type)
             yield f"Loading model {model_filename}..."
-            wan_model, offloadobj, _ = load_models(model_type)
+            wan_model, offloadobj = load_models(model_type)
             yield f"Model loaded"
             reload_needed=  False 
         return   
@@ -6770,6 +6834,8 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
             diffusion_forcing = "diffusion_forcing" in model_filename 
             ltxv = "ltxv" in model_filename 
             lock_inference_steps = model_def.get("lock_inference_steps", False)
+            model_reference_image = model_def.get("reference_image", False)
+            no_steps_skipping = model_def.get("no_steps_skipping", False)
             recammaster = base_model_type in ["recam_1.3B"]
             vace = test_vace_module(base_model_type)
             phantom = base_model_type in ["phantom_1.3B", "phantom_14B"]
@@ -6899,7 +6965,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                     keep_frames_video_source = gr.Text(visible=False)
                     any_video_source = False
 
-            with gr.Column(visible= vace or phantom or hunyuan_video_custom or hunyuan_video_avatar or hunyuan_video_custom_edit or t2v or ltxv or flux and model_def.get("reference_image", False) ) as video_prompt_column: 
+            with gr.Column(visible= vace or phantom or hunyuan_video_custom or hunyuan_video_avatar or hunyuan_video_custom_edit or t2v or ltxv or flux and model_reference_image) as video_prompt_column: 
                 video_prompt_type_value= ui_defaults.get("video_prompt_type","")
                 video_prompt_type = gr.Text(value= video_prompt_type_value, visible= False)
                 any_control_video = True
@@ -6957,7 +7023,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                             ],
                             value=filter_letters(video_prompt_type_value, "PDSLCMUV"),
                             label="Image to Image" if image_outputs else "Video to Video", scale = 3, visible= True, show_label= True,
-                        )
+                        )                        
                     else:
                         any_control_video = False
                         any_control_image = False
@@ -7022,6 +7088,20 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                             visible = True,
                             label="Reference Images", scale = 2
                         )
+
+
+                    elif flux and model_reference_image:
+                        video_prompt_type_image_refs = gr.Dropdown(
+                            choices=[
+                                ("None", ""),
+                                ("Inject only People / Objects", "I"),
+                                ("Inject Main Subject / Landscape and then People / Objects", "KI"),
+                                ],
+                            value=filter_letters(video_prompt_type_value, "KFI"),
+                            visible = True,
+                            show_label=False,
+                            label="Reference Images Combination Method", scale = 2
+                        )
                     else:
                         video_prompt_type_image_refs = gr.Dropdown(
                             choices=[ ("Start / Ref Image", "I")],
@@ -7062,11 +7142,11 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                 frames_positions = gr.Text(value=ui_defaults.get("frames_positions","") , visible= "F" in video_prompt_type_value, scale = 2, label= "Positions of Injected Frames separated by Spaces (1=first, no position for Objects / People)" ) 
                 remove_background_images_ref = gr.Dropdown(
                     choices=[
-                        ("Keep Backgrounds behind People / Objects", 0),
-                        ("Remove Backgrounds behind People / Objects", 1),
+                        ("Keep Backgrounds behind all Reference Images", 0),
+                        ("Remove Backgrounds only behind People / Objects", 1),
                     ],
                     value=ui_defaults.get("remove_background_images_ref",1),
-                    label="Automatic Removal of Background of People or Objects (Only)", scale = 3, visible= "I" in video_prompt_type_value and not hunyuan_video_avatar and not flux
+                    label="Automatic Removal of Background of People or Objects (Only)", scale = 3, visible= "I" in video_prompt_type_value and not hunyuan_video_avatar
                 )
 
             any_audio_voices_support = any_audio_track(base_model_type) 
@@ -7184,6 +7264,10 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                             audio_guidance_scale = gr.Slider(1.0, 20.0, value=ui_defaults.get("audio_guidance_scale", 5 if fantasy else 4), step=0.5, label="Audio Guidance", visible=(fantasy or multitalk) and not no_guidance)
                             embedded_guidance_scale = gr.Slider(1.0, 20.0, value=ui_defaults.get("embedded_guidance", 2.5 if flux else 6.0), step=0.5, label="Embedded Guidance Scale", visible=(hunyuan_t2v or hunyuan_i2v or flux) and not no_guidance)
                             flow_shift = gr.Slider(1.0, 25.0, value=ui_defaults.get("flow_shift",3), step=0.1, label="Shift Scale", visible = not image_outputs) 
+                        with gr.Row(visible = not ltxv and not (no_guidance and image_outputs)) as guidance_row2:
+                            guidance2_scale = gr.Slider(1.0, 20.0, value=ui_defaults.get("guidance2_scale",5), step=0.5, label="Guidance2 (CFG)", visible=not (hunyuan_t2v or hunyuan_i2v or flux) and not no_guidance)
+                            switch_threshold = gr.Slider(0, 1000, value=ui_defaults.get("switch_threshold",0), step=1, label="Guidance / Model Switch Threshold", visible=not (hunyuan_t2v or hunyuan_i2v or flux) and not no_guidance)
+
                         with gr.Row(visible = get_model_family(model_type) == "wan" and not diffusion_forcing ) as sample_solver_row:
                             sample_solver = gr.Dropdown( value=ui_defaults.get("sample_solver",""), 
                                 choices=[
@@ -7224,7 +7308,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                             label="Activated Loras"
                         )
                         loras_multipliers = gr.Textbox(label="Loras Multipliers (1.0 by default) separated by Space chars or CR, lines that start with # are ignored", value=launch_multis_str)
-                with gr.Tab("Steps Skipping", visible = not (ltxv or image_outputs)) as speed_tab:
+                with gr.Tab("Steps Skipping", visible = not (ltxv or image_outputs) and not no_steps_skipping) as speed_tab:
                     with gr.Column():
                         gr.Markdown("<B>Tea Cache and Mag Cache accelerate the Video Generation by skipping intelligently some steps, the more steps are skipped the lower the quality of the video.</B>")
                         gr.Markdown("<B>Steps Skipping  consumes also VRAM. It is recommended not to skip at least the first 10% steps.</B>")
@@ -7587,7 +7671,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                                       video_guide_outpainting_col,video_guide_outpainting_top, video_guide_outpainting_bottom, video_guide_outpainting_left, video_guide_outpainting_right,
                                       video_guide_outpainting_checkbox, video_guide_outpainting_row, show_advanced, video_info_to_control_video_btn, video_info_to_video_source_btn, sample_solver_row,
                                       video_buttons_row, image_buttons_row, video_postprocessing_tab, video_info_to_start_image_btn, video_info_to_end_image_btn, video_info_to_reference_image_btn, video_info_to_image_guide_btn, video_info_to_image_mask_btn,
-                                      NAG_col, speakers_locations_row, guidance_row, resolution_group, cfg_free_guidance_col, control_net_weights_row, image_mode_tabs, min_frames_if_references_col] #  presets_column,
+                                      NAG_col, speakers_locations_row, guidance_row, guidance_row2, resolution_group, cfg_free_guidance_col, control_net_weights_row, image_mode_tabs, min_frames_if_references_col] #  presets_column,
         if update_form:
             locals_dict = locals()
             gen_inputs = [state_dict if k=="state" else locals_dict[k]  for k in inputs_names] + [state_dict] + extra_inputs
@@ -8275,7 +8359,7 @@ def compact_name(family_name, model_name):
     return model_name
 
 def get_sorted_dropdown(dropdown_types, current_model_family):
-    models_families = [get_model_family(type) for type in dropdown_types] 
+    models_families = [get_model_family(type, for_ui= True) for type in dropdown_types] 
     families = {}
     for family in models_families:
         if family not in families: families[family] = 1
@@ -8295,7 +8379,7 @@ def generate_dropdown_model_list(current_model_type):
     dropdown_types= transformer_types if len(transformer_types) > 0 else displayed_model_types 
     if current_model_type not in dropdown_types:
         dropdown_types.append(current_model_type)
-    current_model_family = get_model_family(current_model_type)
+    current_model_family = get_model_family(current_model_type, for_ui= True)
     sorted_familes, dropdown_choices = get_sorted_dropdown(dropdown_types, current_model_family)
 
     dropdown_families = gr.Dropdown(
@@ -8318,12 +8402,12 @@ def generate_dropdown_model_list(current_model_type):
 def change_model_family(state, current_model_family):
     dropdown_types= transformer_types if len(transformer_types) > 0 else displayed_model_types 
     current_family_name = families_infos[current_model_family][1]
-    models_families = [get_model_family(type) for type in dropdown_types] 
+    models_families = [get_model_family(type, for_ui= True) for type in dropdown_types] 
     dropdown_choices = [ (compact_name(current_family_name,  get_model_name(model_type)), model_type) for model_type, family in zip(dropdown_types, models_families) if family == current_model_family ]
     dropdown_choices = sorted(dropdown_choices, key=lambda c: c[0])
     last_model_per_family = state.get("last_model_per_family", {})
     model_type = last_model_per_family.get(current_model_family, "")
-    if len(model_type) == "" or model_type not in displayed_model_types:  model_type = dropdown_choices[0][1]
+    if len(model_type) == "" or model_type not in [choice[1] for choice in dropdown_choices] :  model_type = dropdown_choices[0][1]
     return gr.Dropdown(choices= dropdown_choices, value = model_type )
 
 def set_new_tab(tab_state, new_tab_no):

@@ -214,7 +214,7 @@ def prepare_kontext(
     clip: HFEmbedder,
     prompt: str | list[str],
     ae: AutoEncoder,
-    img_cond: str,
+    img_cond_list: list,
     seed: int,
     device: torch.device,
     target_width: int | None = None,
@@ -225,7 +225,10 @@ def prepare_kontext(
     if bs == 1 and not isinstance(prompt, str):
         bs = len(prompt)
 
-    if img_cond != None:
+    img_cond_seq = None
+    img_cond_seq_ids = None
+
+    for cond_no, img_cond in enumerate(img_cond_list): 
         width, height = img_cond.size
         aspect_ratio = width / height
 
@@ -239,20 +242,19 @@ def prepare_kontext(
         img_cond = np.array(img_cond)
         img_cond = torch.from_numpy(img_cond).float() / 127.5 - 1.0
         img_cond = rearrange(img_cond, "h w c -> 1 c h w")
-        img_cond_orig = img_cond.clone()
-
         with torch.no_grad():
-            img_cond = ae.encode(img_cond.to(device))
+            img_cond_latents = ae.encode(img_cond.to(device))
 
-        img_cond = img_cond.to(torch.bfloat16)
-        img_cond = rearrange(img_cond, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
+        img_cond_latents = img_cond_latents.to(torch.bfloat16)
+        img_cond_latents = rearrange(img_cond_latents, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
         if img_cond.shape[0] == 1 and bs > 1:
-            img_cond = repeat(img_cond, "1 ... -> bs ...", bs=bs)
+            img_cond_latents = repeat(img_cond_latents, "1 ... -> bs ...", bs=bs)
+        img_cond = None
 
         # image ids are the same as base image with the first dimension set to 1
         # instead of 0
         img_cond_ids = torch.zeros(height // 2, width // 2, 3)
-        img_cond_ids[..., 0] = 1
+        img_cond_ids[..., 0] = cond_no + 1
         img_cond_ids[..., 1] = img_cond_ids[..., 1] + torch.arange(height // 2)[:, None]
         img_cond_ids[..., 2] = img_cond_ids[..., 2] + torch.arange(width // 2)[None, :]
         img_cond_ids = repeat(img_cond_ids, "h w c -> b (h w) c", b=bs)
@@ -262,10 +264,10 @@ def prepare_kontext(
         if target_height is None:
             target_height = 8 * height
         img_cond_ids = img_cond_ids.to(device)
-    else:
-        img_cond = None
-        img_cond_ids = None
-        img_cond_orig = None
+        if cond_no == 0:
+            img_cond_seq, img_cond_seq_ids  = img_cond_latents, img_cond_ids
+        else:
+            img_cond_seq, img_cond_seq_ids  =  torch.cat([img_cond_seq, img_cond_latents], dim=1), torch.cat([img_cond_seq_ids, img_cond_ids], dim=1)
         
     img = get_noise(
         bs,
@@ -277,9 +279,8 @@ def prepare_kontext(
     )
 
     return_dict = prepare(t5, clip, img, prompt)
-    return_dict["img_cond_seq"] = img_cond
-    return_dict["img_cond_seq_ids"] = img_cond_ids
-    return_dict["img_cond_orig"] = img_cond_orig
+    return_dict["img_cond_seq"] = img_cond_seq
+    return_dict["img_cond_seq_ids"] = img_cond_seq_ids
     return return_dict, target_height, target_width
 
 
