@@ -76,7 +76,7 @@ def get_model(persistent_models = False, verboseLevel = 1) -> tuple[MMAudio, Fea
 
 @torch.inference_mode()
 def video_to_audio(video, prompt: str, negative_prompt: str, seed: int, num_steps: int,
-                   cfg_strength: float, duration: float, video_save_path , persistent_models = False, verboseLevel = 1):
+                   cfg_strength: float, duration: float, save_path , persistent_models = False, audio_file_only = False, verboseLevel = 1):
 
     global device
 
@@ -110,11 +110,17 @@ def video_to_audio(video, prompt: str, negative_prompt: str, seed: int, num_step
                       )
     audio = audios.float().cpu()[0]
 
-    make_video(video, video_info, video_save_path, audio, sampling_rate=seq_cfg.sampling_rate)
+
+    if audio_file_only:
+        import torchaudio
+        torchaudio.save(save_path, audio.unsqueeze(0) if audio.dim() == 1 else audio, seq_cfg.sampling_rate)
+    else:
+        make_video(video, video_info, save_path, audio, sampling_rate=seq_cfg.sampling_rate)
+
     offloadobj.unload_all()
     if not persistent_models:
         offloadobj.release()
 
     torch.cuda.empty_cache()
     gc.collect()
-    return video_save_path
+    return save_path

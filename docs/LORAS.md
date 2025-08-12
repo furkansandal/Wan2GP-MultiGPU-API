@@ -63,6 +63,31 @@ For dynamic effects over generation steps, use comma-separated values:
 - First lora: 0.9 → 0.8 → 0.7
 - Second lora: 1.2 → 1.1 → 1.0
 
+With models like Wan 2.2 that uses internally two diffusion models (*High noise* / *Low Noise*) you can specify which Loras you want to be applied for a specific phase by separating each phase with a ";".
+
+For instance, if you want to disable a lora for phase *High Noise* and enables it only for phase *Low Noise*:
+```
+0;1
+```
+
+Also with Wan 2.2, if you have two loras and you want the first one to be applied only during the High noise and the second one during the Low noise phase:
+```
+1;0 0;1 
+```
+
+As usual, you can use any float for of multiplier and have a multiplier varries throughout one phase for one Lora:
+```
+0.9,0.8;1.2,1.1,1
+```
+In this example multiplier 0.9 and 0.8 will be used during the *High Noise* phase and 1.2, 1.1 and 1 during the *Low Noise* phase.
+
+Here is another example for two loras:
+```
+0.9,0.8;1.2,1.1,1
+0.5;0,0.7
+```
+
+Note that the syntax for multipliers can also be used in a Finetune model definition file (except that each multiplier definition is a string in a json list)
 ## Lora Presets
 
 Lora Presets are combinations of loras with predefined multipliers and prompts.

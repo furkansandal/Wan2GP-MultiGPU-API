@@ -21,6 +21,7 @@ from segment_anything.modeling.image_encoder import window_partition, window_unp
 from .utils.get_default_model import get_matanyone_model
 from .matanyone.inference.inference_core import InferenceCore
 from .matanyone_wrapper import matanyone
+from shared.utils.audio_video import save_video, save_image
 
 arg_device = "cuda"
 arg_sam_model_type="vit_h"
@@ -69,6 +70,10 @@ def get_frames_from_image(image_input, image_state):
         [[0:nearest_frame], [nearest_frame:], nearest_frame]
     """
 
+    if image_input is None:
+       gr.Info("Please select an Image file")
+       return [gr.update()] * 17
+
     user_name = time.time()
     frames = [image_input] * 2  # hardcode: mimic a video with 2 frames
     image_size = (frames[0].shape[0],frames[0].shape[1]) 
@@ -94,10 +99,11 @@ def get_frames_from_image(image_input, image_state):
                         gr.update(visible=True, maximum=10, value=10), gr.update(visible=False, maximum=len(frames), value=len(frames)), \
                         gr.update(visible=True), gr.update(visible=True), \
                         gr.update(visible=True), gr.update(visible=True),\
-                        gr.update(visible=True), gr.update(visible=True), \
-                        gr.update(visible=True), gr.update(value="", visible=True),  gr.update(visible=False), \
+                        gr.update(visible=True), gr.update(visible=False), \
+                        gr.update(visible=False), gr.update(value="", visible=False),  gr.update(visible=False), \
                         gr.update(visible=False), gr.update(visible=True), \
                         gr.update(visible=True)
+
 
 # extract frames from upload video
 def get_frames_from_video(video_input, video_state):
@@ -108,7 +114,9 @@ def get_frames_from_video(video_input, video_state):
     Return 
         [[0:nearest_frame], [nearest_frame:], nearest_frame]
     """
-
+    if video_input is None:
+       gr.Info("Please select a Video file")
+       return [gr.update()] * 18 
 
     while model == None:
         time.sleep(1)
@@ -370,17 +378,18 @@ def show_mask(video_state, interactive_state, mask_dropdown):
         return select_frame
 
 
-def save_video(frames, output_path, fps):
+# def save_video(frames, output_path, fps):
 
-    writer = imageio.get_writer( output_path, fps=fps, codec='libx264', quality=8)
-    for frame in frames:
-        writer.append_data(frame)
-    writer.close()
+#     writer = imageio.get_writer( output_path, fps=fps, codec='libx264', quality=8)
+#     for frame in frames:
+#         writer.append_data(frame)
+#     writer.close()
 
-    return output_path
+#     return output_path
 
 def mask_to_xyxy_box(mask):
     rows, cols = np.where(mask == 255)
+    if len(rows) == 0 or len(cols) == 0: return []
     xmin = min(cols)
     xmax = max(cols) + 1
     ymin = min(rows)
@@ -449,13 +458,18 @@ def image_matting(video_state, interactive_state, mask_dropdown, erode_kernel_si
     bbox_info = mask_to_xyxy_box(alpha_output)
     h = alpha_output.shape[0]
     w = alpha_output.shape[1]
-    bbox_info = [str(int(bbox_info[0]/ w * 100 )), str(int(bbox_info[1]/ h * 100 )),  str(int(bbox_info[2]/ w * 100 )), str(int(bbox_info[3]/ h * 100 )) ]
-    bbox_info = ":".join(bbox_info)
+    if len(bbox_info) == 0:
+        bbox_info = ""
+    else:
+        bbox_info = [str(int(bbox_info[0]/ w * 100 )), str(int(bbox_info[1]/ h * 100 )),  str(int(bbox_info[2]/ w * 100 )), str(int(bbox_info[3]/ h * 100 )) ]
+        bbox_info = ":".join(bbox_info)
     alpha_output = Image.fromarray(alpha_output)
-    return foreground_output, alpha_output, bbox_info, gr.update(visible=True), gr.update(visible=True) 
+    # return gr.update(value=foreground_output, visible= True), gr.update(value=alpha_output, visible= True), gr.update(value=bbox_info, visible= True), gr.update(visible=True), gr.update(visible=True)
+ 
+    return foreground_output, alpha_output, gr.update(visible = True), gr.update(visible = True), gr.update(value=bbox_info, visible= True), gr.update(visible=True), gr.update(visible=True)
 
 # video matting
-def video_matting(video_state, end_slider, matting_type, interactive_state, mask_dropdown, erode_kernel_size, dilate_kernel_size):
+def video_matting(video_state,video_input, end_slider, matting_type, interactive_state, mask_dropdown, erode_kernel_size, dilate_kernel_size):
     matanyone_processor = InferenceCore(matanyone_model, cfg=matanyone_model.cfg)
     # if interactive_state["track_end_number"]:
     #     following_frames = video_state["origin_images"][video_state["select_frame_number"]:interactive_state["track_end_number"]]
@@ -521,10 +535,21 @@ def video_matting(video_state, end_slider, matting_type, interactive_state, mask
 
     file_name= video_state["video_name"]
     file_name = ".".join(file_name.split(".")[:-1]) 
-    foreground_output = save_video(foreground, output_path="./mask_outputs/{}_fg.mp4".format(file_name), fps=fps)
-    # foreground_output = generate_video_from_frames(foreground, output_path="./results/{}_fg.mp4".format(video_state["video_name"]), fps=fps, audio_path=audio_path) # import video_input to name the output video
-    alpha_output = save_video(alpha, output_path="./mask_outputs/{}_alpha.mp4".format(file_name), fps=fps)
-    # alpha_output = generate_video_from_frames(alpha, output_path="./results/{}_alpha.mp4".format(video_state["video_name"]), fps=fps, gray2rgb=True, audio_path=audio_path) # import video_input to name the output video
+ 
+    from shared.utils.audio_video import extract_audio_tracks, combine_video_with_audio_tracks, cleanup_temp_audio_files    
+    source_audio_tracks, audio_metadata  = extract_audio_tracks(video_input)
+    output_fg_path =  f"./mask_outputs/{file_name}_fg.mp4"
+    output_fg_temp_path =  f"./mask_outputs/{file_name}_fg_tmp.mp4"
+    if len(source_audio_tracks) == 0:
+        foreground_output = save_video(foreground,output_fg_path , fps=fps, codec_type= video_output_codec)
+    else:
+        foreground_output_tmp = save_video(foreground, output_fg_temp_path , fps=fps,  codec_type= video_output_codec)
+        combine_video_with_audio_tracks(output_fg_temp_path, source_audio_tracks, output_fg_path, audio_metadata=audio_metadata)
+        cleanup_temp_audio_files(source_audio_tracks)
+        os.remove(foreground_output_tmp)
+        foreground_output = output_fg_path
+
+    alpha_output = save_video(alpha, "./mask_outputs/{}_alpha.mp4".format(file_name), fps=fps, codec_type= video_output_codec)
 
     return foreground_output, alpha_output, gr.update(visible=True), gr.update(visible=True), gr.update(visible=True), gr.update(visible=True)
 
@@ -721,8 +746,12 @@ def teleport_to_video_tab(tab_state):
     return gr.Tabs(selected="video_gen")
 
 
-def display(tabs, tab_state, vace_video_input, vace_image_input, vace_video_mask, vace_image_mask, vace_image_refs):
+def display(tabs, tab_state, server_config,  vace_video_input, vace_image_input, vace_video_mask, vace_image_mask, vace_image_refs):
     # my_tab.select(fn=load_unload_models, inputs=[], outputs=[])
+    global image_output_codec, video_output_codec
+
+    image_output_codec = server_config.get("image_output_codec", None)
+    video_output_codec = server_config.get("video_output_codec", None)
 
     media_url = "https://github.com/pq-yang/MatAnyone/releases/download/media/"
 
@@ -912,7 +941,7 @@ def display(tabs, tab_state, vace_video_input, vace_image_input, vace_video_mask
                     inputs=[],
                     outputs=[foreground_video_output, alpha_video_output]).then(
                     fn=video_matting,
-                    inputs=[video_state, end_selection_slider,  matting_type, interactive_state, mask_dropdown, erode_kernel_size, dilate_kernel_size],
+                    inputs=[video_state, video_input, end_selection_slider,  matting_type, interactive_state, mask_dropdown, erode_kernel_size, dilate_kernel_size],
                     outputs=[foreground_video_output, alpha_video_output,foreground_video_output, alpha_video_output, export_to_vace_video_14B_btn, export_to_current_video_engine_btn]
                 )
 
@@ -1053,7 +1082,7 @@ def display(tabs, tab_state, vace_video_input, vace_image_input, vace_video_mask
                         foreground_image_output = gr.Image(type="pil", label="Foreground Output", visible=False, elem_classes="image")
                         alpha_image_output = gr.Image(type="pil", label="Mask", visible=False, elem_classes="image")
                     with gr.Row(equal_height=True):
-                        bbox_info = gr.Text(label ="Mask BBox Info (Left:Top:Right:Bottom)", interactive= False)
+                        bbox_info = gr.Text(label ="Mask BBox Info (Left:Top:Right:Bottom)", visible = False, interactive= False)
                     with gr.Row():
                         # with gr.Row():
                         export_image_btn = gr.Button(value="Add to current Reference Images", visible=False, elem_classes="new_button")
@@ -1116,7 +1145,7 @@ def display(tabs, tab_state, vace_video_input, vace_image_input, vace_video_mask
                 matting_button.click(
                     fn=image_matting,
                     inputs=[image_state, interactive_state, mask_dropdown, erode_kernel_size, dilate_kernel_size, image_selection_slider],
-                    outputs=[foreground_image_output, alpha_image_output,bbox_info, export_image_btn, export_image_mask_btn]
+                    outputs=[foreground_image_output, alpha_image_output,foreground_image_output, alpha_image_output,bbox_info, export_image_btn, export_image_mask_btn]
                 )
 
 
